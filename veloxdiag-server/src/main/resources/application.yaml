@@ -1,13 +1,18 @@
 spring:
   application:
-    name: veloxdiag-server
+    name: CET_CELL
 
   datasource:
-    url: jdbc:mysql://hayabusa.proxy.rlwy.net:17602/railway
-    username: root
-    password: ${DB_PASSWORD}
+    url: YOUR_DATABASE_URL
+    username: YOUR_USERNAME
+    password: YOUR_PASSWORD
 
   jpa:
     hibernate:
       ddl-auto: update
     show-sql: true
+
+server:
+  port: 8080
+
+ 
