@@ -3,7 +3,7 @@ spring:
     name: veloxdiag-server
 
   datasource:
-    url: jdbc:mysql://localhost:3306/veloxdiag
+    url: jdbc:mysql://hayabusa.proxy.rlwy.net:17602/railway
     username: root
     password: ${DB_PASSWORD}
 
@@ -11,6 +11,3 @@ spring:
     hibernate:
       ddl-auto: update
     show-sql: true
-
-server:
-  port: 8081
