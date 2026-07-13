@@ -3,9 +3,9 @@ spring:
     name: CET_CELL
 
   datasource:
-    url: YOUR_DATABASE_URL
-    username: YOUR_USERNAME
-    password: YOUR_PASSWORD
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
 
   jpa:
     hibernate:
@@ -14,5 +14,3 @@ spring:
 
 server:
   port: 8080
-
- 
