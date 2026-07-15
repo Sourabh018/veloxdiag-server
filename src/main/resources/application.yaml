@@ -1,6 +1,6 @@
 spring:
   application:
-    name: CET_CELL
+    name: veloxdiag-server
 
   datasource:
     url: ${DB_URL}
