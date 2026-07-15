@@ -11,6 +11,8 @@ import org.springframework.web.bind.annotation.RestController;
 import com.veloxdiag.server.entity.Telemetry;
 import com.veloxdiag.server.service.TelemetryService;
 
+import jakarta.validation.Valid;
+
 @RestController
 @RequestMapping("/api/telemetry")
 public class TelemetryController {
@@ -22,7 +24,7 @@ public class TelemetryController {
     }
 
     @PostMapping
-    public Telemetry saveTelemetry(@RequestBody Telemetry telemetry) {
+    public Telemetry saveTelemetry(@Valid @RequestBody Telemetry telemetry) {
         return telemetryService.saveTelemetry(telemetry);
     }
 
