@@ -35,7 +35,7 @@ public class DiagnosisService {
         List<DiagnosisFinding> findings = new ArrayList<>();
 
         Map<String, List<Telemetry>> byEndpoint = allTelemetry.stream()
-                .collect(Collectors.groupingBy(Telemetry::getEndpoint));
+                .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
 
         for (Map.Entry<String, List<Telemetry>> entry : byEndpoint.entrySet()) {
             String endpoint = entry.getKey();

@@ -27,7 +27,7 @@ public class QueryAnalyzerService {
         List<Telemetry> all = telemetryRepository.findAll();
 
         Map<String, List<Telemetry>> byEndpoint = all.stream()
-                .collect(Collectors.groupingBy(Telemetry::getEndpoint));
+                .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
 
         List<EndpointTrend> trends = new ArrayList<>();
 
