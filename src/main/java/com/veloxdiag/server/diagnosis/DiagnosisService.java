@@ -10,15 +10,25 @@ import java.util.stream.Collectors;
 @Service
 public class DiagnosisService {
 
-    private static final double SLOW_REQUEST_THRESHOLD_MS = 1000.0;
-    private static final long HIGH_ERROR_RATE_THRESHOLD = 3;
-    private static final int SERVER_ERROR_STATUS_THRESHOLD = 500;
+    // Now mutable — adjustable at runtime via Settings, defaults match original hardcoded values
+    private double slowRequestThresholdMs = 1000.0;
+    private long highErrorRateThreshold = 3;
+    private int serverErrorStatusThreshold = 500;
 
     private final TelemetryRepository telemetryRepository;
 
     public DiagnosisService(TelemetryRepository telemetryRepository) {
         this.telemetryRepository = telemetryRepository;
     }
+
+    public double getSlowRequestThresholdMs() { return slowRequestThresholdMs; }
+    public void setSlowRequestThresholdMs(double value) { this.slowRequestThresholdMs = value; }
+
+    public long getHighErrorRateThreshold() { return highErrorRateThreshold; }
+    public void setHighErrorRateThreshold(long value) { this.highErrorRateThreshold = value; }
+
+    public int getServerErrorStatusThreshold() { return serverErrorStatusThreshold; }
+    public void setServerErrorStatusThreshold(int value) { this.serverErrorStatusThreshold = value; }
 
     public List<DiagnosisFinding> runDiagnosis() {
         List<Telemetry> allTelemetry = telemetryRepository.findAll();
@@ -45,7 +55,7 @@ public class DiagnosisService {
                 .average()
                 .orElse(0.0);
 
-        if (avgDuration > SLOW_REQUEST_THRESHOLD_MS) {
+        if (avgDuration > slowRequestThresholdMs) {
             String severity = avgDuration > 5000 ? "HIGH" : (avgDuration > 2000 ? "MEDIUM" : "LOW");
             Map<String, Object> evidence = new HashMap<>();
             evidence.put("averageDurationMs", avgDuration);
@@ -56,7 +66,7 @@ public class DiagnosisService {
                     severity,
                     endpoint,
                     String.format("Endpoint %s is averaging %.0fms per request, above the %.0fms threshold.",
-                            endpoint, avgDuration, SLOW_REQUEST_THRESHOLD_MS),
+                            endpoint, avgDuration, slowRequestThresholdMs),
                     evidence
             ));
         }
@@ -68,7 +78,7 @@ public class DiagnosisService {
                 .filter(t -> t.getStatus() >= 400)
                 .count();
 
-        if (errorCount >= HIGH_ERROR_RATE_THRESHOLD) {
+        if (errorCount >= highErrorRateThreshold) {
             String severity = errorCount >= 10 ? "HIGH" : "MEDIUM";
             Map<String, Object> evidence = new HashMap<>();
             evidence.put("errorCount", errorCount);
@@ -88,7 +98,7 @@ public class DiagnosisService {
 
     private List<DiagnosisFinding> checkServerErrors(String endpoint, List<Telemetry> records) {
         long serverErrorCount = records.stream()
-                .filter(t -> t.getStatus() >= SERVER_ERROR_STATUS_THRESHOLD)
+                .filter(t -> t.getStatus() >= serverErrorStatusThreshold)
                 .count();
 
         if (serverErrorCount > 0) {
