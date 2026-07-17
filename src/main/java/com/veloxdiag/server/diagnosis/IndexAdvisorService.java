@@ -4,6 +4,7 @@ import com.veloxdiag.server.entity.Telemetry;
 import com.veloxdiag.server.repository.TelemetryRepository;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -21,13 +22,16 @@ public class IndexAdvisorService {
     private static final double LOW_VARIANCE_THRESHOLD = 0.20;
 
     private final TelemetryRepository telemetryRepository;
+    private final TelemetryWindowSettings windowSettings;
 
-    public IndexAdvisorService(TelemetryRepository telemetryRepository) {
+    public IndexAdvisorService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings) {
         this.telemetryRepository = telemetryRepository;
+        this.windowSettings = windowSettings;
     }
 
     public List<IndexAdvisorFinding> analyzeCandidates() {
-        List<Telemetry> all = telemetryRepository.findAll();
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
+        List<Telemetry> all = telemetryRepository.findByTimestampAfter(cutoff);
 
         Map<String, List<Telemetry>> byEndpoint = all.stream()
                 .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));

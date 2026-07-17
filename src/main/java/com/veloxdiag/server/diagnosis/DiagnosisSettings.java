@@ -5,14 +5,17 @@ public class DiagnosisSettings {
     private double slowRequestThresholdMs;
     private long highErrorRateThreshold;
     private int serverErrorStatusThreshold;
+    private int lookbackDays;
 
     public DiagnosisSettings() {
     }
 
-    public DiagnosisSettings(double slowRequestThresholdMs, long highErrorRateThreshold, int serverErrorStatusThreshold) {
+    public DiagnosisSettings(double slowRequestThresholdMs, long highErrorRateThreshold,
+                              int serverErrorStatusThreshold, int lookbackDays) {
         this.slowRequestThresholdMs = slowRequestThresholdMs;
         this.highErrorRateThreshold = highErrorRateThreshold;
         this.serverErrorStatusThreshold = serverErrorStatusThreshold;
+        this.lookbackDays = lookbackDays;
     }
 
     public double getSlowRequestThresholdMs() { return slowRequestThresholdMs; }
@@ -23,4 +26,7 @@ public class DiagnosisSettings {
 
     public int getServerErrorStatusThreshold() { return serverErrorStatusThreshold; }
     public void setServerErrorStatusThreshold(int serverErrorStatusThreshold) { this.serverErrorStatusThreshold = serverErrorStatusThreshold; }
+
+    public int getLookbackDays() { return lookbackDays; }
+    public void setLookbackDays(int lookbackDays) { this.lookbackDays = lookbackDays; }
 }

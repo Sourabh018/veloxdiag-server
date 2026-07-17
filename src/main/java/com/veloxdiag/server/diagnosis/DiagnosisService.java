@@ -4,6 +4,7 @@ import com.veloxdiag.server.entity.Telemetry;
 import com.veloxdiag.server.repository.TelemetryRepository;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -16,9 +17,11 @@ public class DiagnosisService {
     private int serverErrorStatusThreshold = 500;
 
     private final TelemetryRepository telemetryRepository;
+    private final TelemetryWindowSettings windowSettings;
 
-    public DiagnosisService(TelemetryRepository telemetryRepository) {
+    public DiagnosisService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings) {
         this.telemetryRepository = telemetryRepository;
+        this.windowSettings = windowSettings;
     }
 
     public double getSlowRequestThresholdMs() { return slowRequestThresholdMs; }
@@ -31,7 +34,8 @@ public class DiagnosisService {
     public void setServerErrorStatusThreshold(int value) { this.serverErrorStatusThreshold = value; }
 
     public List<DiagnosisFinding> runDiagnosis() {
-        List<Telemetry> allTelemetry = telemetryRepository.findAll();
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
+        List<Telemetry> allTelemetry = telemetryRepository.findByTimestampAfter(cutoff);
         List<DiagnosisFinding> findings = new ArrayList<>();
 
         Map<String, List<Telemetry>> byEndpoint = allTelemetry.stream()

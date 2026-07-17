@@ -1,5 +1,6 @@
 package com.veloxdiag.server.repository;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 import org.springframework.data.domain.Pageable;
@@ -41,6 +42,9 @@ public interface TelemetryRepository extends JpaRepository<Telemetry, Long> {
             "WHERE timestamp >= (NOW() - INTERVAL :hours HOUR) " +
             "GROUP BY bucket ORDER BY bucket ASC", nativeQuery = true)
     List<Object[]> findHourlyTrends(int hours);
+
+    // used by Diagnosis, Query Analyzer, and Index Advisor to only scan recent telemetry
+    List<Telemetry> findByTimestampAfter(LocalDateTime timestamp);
 
     public interface SlowEndpointProjection {
         String getEndpoint();

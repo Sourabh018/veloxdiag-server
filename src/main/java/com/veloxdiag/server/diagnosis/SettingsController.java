@@ -7,9 +7,11 @@ import org.springframework.web.bind.annotation.*;
 public class SettingsController {
 
     private final DiagnosisService diagnosisService;
+    private final TelemetryWindowSettings windowSettings;
 
-    public SettingsController(DiagnosisService diagnosisService) {
+    public SettingsController(DiagnosisService diagnosisService, TelemetryWindowSettings windowSettings) {
         this.diagnosisService = diagnosisService;
+        this.windowSettings = windowSettings;
     }
 
     @GetMapping
@@ -17,7 +19,8 @@ public class SettingsController {
         return new DiagnosisSettings(
                 diagnosisService.getSlowRequestThresholdMs(),
                 diagnosisService.getHighErrorRateThreshold(),
-                diagnosisService.getServerErrorStatusThreshold()
+                diagnosisService.getServerErrorStatusThreshold(),
+                windowSettings.getLookbackDays()
         );
     }
 
@@ -26,6 +29,7 @@ public class SettingsController {
         diagnosisService.setSlowRequestThresholdMs(settings.getSlowRequestThresholdMs());
         diagnosisService.setHighErrorRateThreshold(settings.getHighErrorRateThreshold());
         diagnosisService.setServerErrorStatusThreshold(settings.getServerErrorStatusThreshold());
+        windowSettings.setLookbackDays(settings.getLookbackDays());
 
         return getSettings();
     }

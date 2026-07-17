@@ -5,6 +5,7 @@ import com.veloxdiag.server.repository.TelemetryRepository;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -18,13 +19,16 @@ public class QueryAnalyzerService {
     private static final double SIGNIFICANT_CHANGE_THRESHOLD = 15.0;
 
     private final TelemetryRepository telemetryRepository;
+    private final TelemetryWindowSettings windowSettings;
 
-    public QueryAnalyzerService(TelemetryRepository telemetryRepository) {
+    public QueryAnalyzerService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings) {
         this.telemetryRepository = telemetryRepository;
+        this.windowSettings = windowSettings;
     }
 
     public List<EndpointTrend> analyzeTrends() {
-        List<Telemetry> all = telemetryRepository.findAll();
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
+        List<Telemetry> all = telemetryRepository.findByTimestampAfter(cutoff);
 
         Map<String, List<Telemetry>> byEndpoint = all.stream()
                 .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
