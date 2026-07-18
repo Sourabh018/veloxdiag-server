@@ -40,7 +40,13 @@ public class Telemetry {
 
 	@NotNull(message = "timestamp is required")
 	private LocalDateTime timestamp;
-	
+
+	// Added for N+1 query detection. Nullable and NOT @NotNull on purpose:
+	// older Starter versions (pre-query-counting) won't send this field at
+	// all, and apps without JPA/Hibernate will always send 0. Both cases
+	// must not fail validation on incoming telemetry.
+	private Long queryCount;
+
 	public Telemetry() {
 
 	}
@@ -114,6 +120,14 @@ this.timestamp = timestamp;
 
 	public void setTimestamp(LocalDateTime timestamp) {
 		this.timestamp = timestamp;
+	}
+
+	public Long getQueryCount() {
+		return queryCount;
+	}
+
+	public void setQueryCount(Long queryCount) {
+		this.queryCount = queryCount;
 	}
 
 }
