@@ -23,6 +23,15 @@ public interface TelemetryRepository extends JpaRepository<Telemetry, Long> {
     @Query("SELECT COUNT(DISTINCT t.applicationName) FROM Telemetry t")
     long getConnectedApplications();
 
+    // Combines the 4 queries above into 1 — used by getSummary() to avoid firing
+    // 4 separate round-trips on every dashboard poll.
+    @Query("SELECT COUNT(t) as totalRequests, " +
+           "AVG(t.durationMs) as averageResponseTime, " +
+           "SUM(CASE WHEN t.status >= 400 THEN 1 ELSE 0 END) as errorRequests, " +
+           "COUNT(DISTINCT t.applicationName) as connectedApplications " +
+           "FROM Telemetry t")
+    SummaryProjection getSummaryStats();
+
     // recent requests, most recent first, capped by Pageable limit
     List<Telemetry> findAllByOrderByTimestampDesc(Pageable pageable);
 
@@ -50,5 +59,12 @@ public interface TelemetryRepository extends JpaRepository<Telemetry, Long> {
         String getEndpoint();
         Double getAvgDuration();
         Long getCount();
+    }
+
+    public interface SummaryProjection {
+        Long getTotalRequests();
+        Double getAverageResponseTime();
+        Long getErrorRequests();
+        Long getConnectedApplications();
     }
 }

@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import com.veloxdiag.server.entity.Telemetry;
 import com.veloxdiag.server.repository.TelemetryRepository;
 import com.veloxdiag.server.repository.TelemetryRepository.SlowEndpointProjection;
+import com.veloxdiag.server.repository.TelemetryRepository.SummaryProjection;
 
 @Service
 public class DashboardService {
@@ -20,16 +21,14 @@ public class DashboardService {
     }
 
     public DashboardSummary getSummary() {
+        // Was 4 separate queries (getTotalRequests, getAverageResponseTime,
+        // getErrorRequests, getConnectedApplications) — now 1.
+        SummaryProjection stats = telemetryRepository.getSummaryStats();
 
-        long totalRequests = telemetryRepository.getTotalRequests();
-
-        Double avg = telemetryRepository.getAverageResponseTime();
-        double averageResponseTime = (avg == null) ? 0.0 : avg;
-
-        long errorRequests = telemetryRepository.getErrorRequests();
-
-        long connectedApplications =
-                telemetryRepository.getConnectedApplications();
+        long totalRequests = stats.getTotalRequests() == null ? 0L : stats.getTotalRequests();
+        double averageResponseTime = stats.getAverageResponseTime() == null ? 0.0 : stats.getAverageResponseTime();
+        long errorRequests = stats.getErrorRequests() == null ? 0L : stats.getErrorRequests();
+        long connectedApplications = stats.getConnectedApplications() == null ? 0L : stats.getConnectedApplications();
 
         return new DashboardSummary(
                 totalRequests,
