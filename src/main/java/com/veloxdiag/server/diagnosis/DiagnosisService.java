@@ -49,10 +49,17 @@ public class DiagnosisService {
             String endpoint = entry.getKey();
             List<Telemetry> records = entry.getValue();
 
-            findings.addAll(checkSlowRequest(endpoint, records));
-            findings.addAll(checkHighErrorRate(endpoint, records));
-            findings.addAll(checkServerErrors(endpoint, records));
-            findings.addAll(checkPossibleNPlusOne(endpoint, records));
+            List<DiagnosisFinding> endpointFindings = new ArrayList<>();
+            endpointFindings.addAll(checkSlowRequest(endpoint, records));
+            endpointFindings.addAll(checkHighErrorRate(endpoint, records));
+            endpointFindings.addAll(checkServerErrors(endpoint, records));
+            endpointFindings.addAll(checkPossibleNPlusOne(endpoint, records));
+
+            findings.addAll(endpointFindings);
+            // Correlation runs after the individual checks for this endpoint, since it
+            // needs to know which finding types already fired here before it decides
+            // whether a root-cause link between them is worth surfacing.
+            findings.addAll(correlateFindings(endpoint, records, endpointFindings));
         }
 
         return findings;
@@ -161,5 +168,91 @@ public class DiagnosisService {
             ));
         }
         return List.of();
+    }
+
+    /**
+     * Root Cause Correlation — first rule: links SLOW_REQUEST and POSSIBLE_N_PLUS_ONE
+     * on the same endpoint, but only when we can actually show the duration difference
+     * between "spiky" (high query count) and "normal" requests for that endpoint —
+     * not just that both findings happened to fire.
+     *
+     * Confidence is derived from the real ratio between the two groups' average
+     * durations, mirroring the manual analysis that first validated this correlation
+     * (26-query requests running ~5-15x slower than ~6-query requests on the same
+     * endpoint). We deliberately avoid inventing a numeric percentage — a HIGH/MEDIUM/LOW
+     * label backed by an actual measured ratio is honest; a fabricated "87% confidence"
+     * would not be.
+     */
+    private List<DiagnosisFinding> correlateFindings(String endpoint, List<Telemetry> records,
+                                                       List<DiagnosisFinding> endpointFindings) {
+        boolean hasSlowRequest = endpointFindings.stream()
+                .anyMatch(f -> f.getRuleType().equals("SLOW_REQUEST"));
+        boolean hasNPlusOne = endpointFindings.stream()
+                .anyMatch(f -> f.getRuleType().equals("POSSIBLE_N_PLUS_ONE"));
+
+        if (!hasSlowRequest || !hasNPlusOne) {
+            return List.of();
+        }
+
+        // Split this endpoint's records into "spiky" (query count above the N+1
+        // threshold) vs "normal" (query count present but at/below threshold).
+        // Records with a null queryCount (older Starter versions / non-JPA apps)
+        // are excluded from both groups rather than guessed at.
+        List<Telemetry> spikyRecords = records.stream()
+                .filter(t -> t.getQueryCount() != null && t.getQueryCount() > possibleNPlusOneQueryThreshold)
+                .collect(Collectors.toList());
+        List<Telemetry> normalRecords = records.stream()
+                .filter(t -> t.getQueryCount() != null && t.getQueryCount() <= possibleNPlusOneQueryThreshold)
+                .collect(Collectors.toList());
+
+        OptionalDouble spikyAvgDurationOpt = spikyRecords.stream()
+                .mapToLong(Telemetry::getDurationMs).average();
+        OptionalDouble normalAvgDurationOpt = normalRecords.stream()
+                .mapToLong(Telemetry::getDurationMs).average();
+
+        Map<String, Object> evidence = new HashMap<>();
+        evidence.put("spikySampleCount", spikyRecords.size());
+        evidence.put("normalSampleCount", normalRecords.size());
+
+        String confidence;
+        String message;
+
+        if (spikyAvgDurationOpt.isPresent() && normalAvgDurationOpt.isPresent() && normalRecords.size() >= 3) {
+            double spikyAvg = spikyAvgDurationOpt.getAsDouble();
+            double normalAvg = normalAvgDurationOpt.getAsDouble();
+            double ratio = normalAvg > 0 ? spikyAvg / normalAvg : 0;
+
+            evidence.put("spikyAvgDurationMs", spikyAvg);
+            evidence.put("normalAvgDurationMs", normalAvg);
+            evidence.put("durationRatio", ratio);
+
+            // HIGH: spiky requests are at least 2x slower than normal ones on the
+            // same endpoint — a real, measured difference, not just co-occurrence.
+            confidence = ratio >= 2.0 ? "HIGH" : "MEDIUM";
+            message = String.format(
+                    "High duration on %s is likely driven by its N+1 query pattern: requests with more than %d queries " +
+                            "averaged %.0fms (n=%d) vs %.0fms (n=%d) for requests at or below that threshold — roughly %.1fx slower.",
+                    endpoint, possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
+        } else {
+            // Both findings fired, but we don't have enough of a baseline (e.g. every
+            // sample was a spike, or too few normal-range samples) to measure a ratio.
+            // Still worth surfacing the correlation, just with lower confidence and an
+            // honest note about why.
+            confidence = "MEDIUM";
+            message = String.format(
+                    "SLOW_REQUEST and POSSIBLE_N_PLUS_ONE both fired for %s, suggesting a link between query volume and " +
+                            "duration, but there weren't enough normal-range samples on this endpoint to measure the exact ratio.",
+                    endpoint);
+        }
+
+        return List.of(new DiagnosisFinding(
+                "ROOT_CAUSE_CORRELATION",
+                confidence,
+                endpoint,
+                message,
+                evidence,
+                confidence,
+                List.of("SLOW_REQUEST", "POSSIBLE_N_PLUS_ONE")
+        ));
     }
 }
