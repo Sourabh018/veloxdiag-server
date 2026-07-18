@@ -162,3 +162,4 @@ public class DiagnosisService {
         }
         return List.of();
     }
+}
