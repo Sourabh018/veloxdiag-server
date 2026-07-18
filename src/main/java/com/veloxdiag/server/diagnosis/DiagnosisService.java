@@ -140,8 +140,11 @@ public class DiagnosisService {
         double avgQueryCount = counts.stream().mapToLong(Long::longValue).average().orElse(0.0);
         long maxQueryCount = counts.stream().mapToLong(Long::longValue).max().orElse(0);
 
-        if (avgQueryCount > possibleNPlusOneQueryThreshold) {
-            String severity = avgQueryCount > 50 ? "HIGH" : (avgQueryCount > 25 ? "MEDIUM" : "LOW");
+        // Flag on MAX, not average — N+1 patterns are often spiky/data-dependent
+        // (e.g. more rows returned -> more per-row queries), so a handful of
+        // cheap requests can mask a genuine N+1 spike if we only look at the mean.
+        if (maxQueryCount > possibleNPlusOneQueryThreshold) {
+            String severity = maxQueryCount > 50 ? "HIGH" : (maxQueryCount > 25 ? "MEDIUM" : "LOW");
             Map<String, Object> evidence = new HashMap<>();
             evidence.put("averageQueryCount", avgQueryCount);
             evidence.put("maxQueryCount", maxQueryCount);
@@ -151,12 +154,11 @@ public class DiagnosisService {
                     "POSSIBLE_N_PLUS_ONE",
                     severity,
                     endpoint,
-                    String.format("Endpoint %s runs %.1f SQL queries per request on average (max %d), " +
+                    String.format("Endpoint %s spiked to %d SQL queries in at least one request (average %.1f across %d samples), " +
                                     "suggesting an N+1 query pattern rather than a single efficient fetch.",
-                            endpoint, avgQueryCount, maxQueryCount),
+                            endpoint, maxQueryCount, avgQueryCount, counts.size()),
                     evidence
             ));
         }
         return List.of();
     }
-}
