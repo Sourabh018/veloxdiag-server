@@ -1,5 +1,6 @@
 package com.veloxdiag.server.diagnosis;
 
+import com.veloxdiag.server.diagnosis.engine.RuleEngineService;
 import com.veloxdiag.server.entity.Telemetry;
 import com.veloxdiag.server.repository.TelemetryRepository;
 import org.springframework.stereotype.Service;
@@ -19,10 +20,13 @@ public class DiagnosisService {
 
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
+    private final RuleEngineService ruleEngineService;
 
-    public DiagnosisService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings) {
+    public DiagnosisService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings,
+                             RuleEngineService ruleEngineService) {
         this.telemetryRepository = telemetryRepository;
         this.windowSettings = windowSettings;
+        this.ruleEngineService = ruleEngineService;
     }
 
     public double getSlowRequestThresholdMs() { return slowRequestThresholdMs; }
@@ -60,6 +64,11 @@ public class DiagnosisService {
             // needs to know which finding types already fired here before it decides
             // whether a root-cause link between them is worth surfacing.
             findings.addAll(correlateFindings(endpoint, records, endpointFindings));
+
+            // Data-driven rules, loaded from rule_definitions, run last. These are
+            // fully independent of the hardcoded checks above — a rule stored in the
+            // DB can fire, be edited, or be added without touching this file at all.
+            findings.addAll(ruleEngineService.evaluate(endpoint, records));
         }
 
         return findings;
