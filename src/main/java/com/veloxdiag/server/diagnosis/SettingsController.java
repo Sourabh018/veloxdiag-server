@@ -33,13 +33,15 @@ public class SettingsController {
                     diagnosisService.setSlowRequestThresholdMs(saved.getSlowRequestThresholdMs());
                     diagnosisService.setHighErrorRateThreshold(saved.getHighErrorRateThreshold());
                     diagnosisService.setServerErrorStatusThreshold(saved.getServerErrorStatusThreshold());
+                    diagnosisService.setPossibleNPlusOneQueryThreshold(saved.getPossibleNPlusOneQueryThreshold());
                     windowSettings.setLookbackDays(saved.getLookbackDays());
                 },
                 () -> appSettingsRepository.save(new AppSettingsEntity(
                         diagnosisService.getSlowRequestThresholdMs(),
                         diagnosisService.getHighErrorRateThreshold(),
                         diagnosisService.getServerErrorStatusThreshold(),
-                        windowSettings.getLookbackDays()
+                        windowSettings.getLookbackDays(),
+                        diagnosisService.getPossibleNPlusOneQueryThreshold()
                 ))
         );
     }
@@ -50,7 +52,8 @@ public class SettingsController {
                 diagnosisService.getSlowRequestThresholdMs(),
                 diagnosisService.getHighErrorRateThreshold(),
                 diagnosisService.getServerErrorStatusThreshold(),
-                windowSettings.getLookbackDays()
+                windowSettings.getLookbackDays(),
+                diagnosisService.getPossibleNPlusOneQueryThreshold()
         );
     }
 
@@ -61,6 +64,7 @@ public class SettingsController {
         diagnosisService.setSlowRequestThresholdMs(settings.getSlowRequestThresholdMs());
         diagnosisService.setHighErrorRateThreshold(settings.getHighErrorRateThreshold());
         diagnosisService.setServerErrorStatusThreshold(settings.getServerErrorStatusThreshold());
+        diagnosisService.setPossibleNPlusOneQueryThreshold(settings.getPossibleNPlusOneQueryThreshold());
         windowSettings.setLookbackDays(settings.getLookbackDays());
 
         // Persist the same values so they survive the next restart/redeploy.
@@ -68,7 +72,8 @@ public class SettingsController {
                 settings.getSlowRequestThresholdMs(),
                 settings.getHighErrorRateThreshold(),
                 settings.getServerErrorStatusThreshold(),
-                settings.getLookbackDays()
+                settings.getLookbackDays(),
+                settings.getPossibleNPlusOneQueryThreshold()
         ));
 
         return getSettings();

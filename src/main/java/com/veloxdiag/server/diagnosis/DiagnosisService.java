@@ -15,6 +15,7 @@ public class DiagnosisService {
     private double slowRequestThresholdMs = 1000.0;
     private long highErrorRateThreshold = 3;
     private int serverErrorStatusThreshold = 500;
+    private long possibleNPlusOneQueryThreshold = 15;
 
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
@@ -33,6 +34,9 @@ public class DiagnosisService {
     public int getServerErrorStatusThreshold() { return serverErrorStatusThreshold; }
     public void setServerErrorStatusThreshold(int value) { this.serverErrorStatusThreshold = value; }
 
+    public long getPossibleNPlusOneQueryThreshold() { return possibleNPlusOneQueryThreshold; }
+    public void setPossibleNPlusOneQueryThreshold(long value) { this.possibleNPlusOneQueryThreshold = value; }
+
     public List<DiagnosisFinding> runDiagnosis() {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
         List<Telemetry> allTelemetry = telemetryRepository.findByTimestampAfter(cutoff);
@@ -48,6 +52,7 @@ public class DiagnosisService {
             findings.addAll(checkSlowRequest(endpoint, records));
             findings.addAll(checkHighErrorRate(endpoint, records));
             findings.addAll(checkServerErrors(endpoint, records));
+            findings.addAll(checkPossibleNPlusOne(endpoint, records));
         }
 
         return findings;
@@ -115,6 +120,40 @@ public class DiagnosisService {
                     endpoint,
                     String.format("Endpoint %s returned %d server error(s) (5xx status).",
                             endpoint, serverErrorCount),
+                    evidence
+            ));
+        }
+        return List.of();
+    }
+
+    private List<DiagnosisFinding> checkPossibleNPlusOne(String endpoint, List<Telemetry> records) {
+        // Older Starter versions / non-JPA apps send queryCount=null — ignore those records
+        List<Long> counts = records.stream()
+                .map(Telemetry::getQueryCount)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+
+        if (counts.isEmpty()) {
+            return List.of();
+        }
+
+        double avgQueryCount = counts.stream().mapToLong(Long::longValue).average().orElse(0.0);
+        long maxQueryCount = counts.stream().mapToLong(Long::longValue).max().orElse(0);
+
+        if (avgQueryCount > possibleNPlusOneQueryThreshold) {
+            String severity = avgQueryCount > 50 ? "HIGH" : (avgQueryCount > 25 ? "MEDIUM" : "LOW");
+            Map<String, Object> evidence = new HashMap<>();
+            evidence.put("averageQueryCount", avgQueryCount);
+            evidence.put("maxQueryCount", maxQueryCount);
+            evidence.put("sampleCount", counts.size());
+
+            return List.of(new DiagnosisFinding(
+                    "POSSIBLE_N_PLUS_ONE",
+                    severity,
+                    endpoint,
+                    String.format("Endpoint %s runs %.1f SQL queries per request on average (max %d), " +
+                                    "suggesting an N+1 query pattern rather than a single efficient fetch.",
+                            endpoint, avgQueryCount, maxQueryCount),
                     evidence
             ));
         }

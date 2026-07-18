@@ -6,16 +6,19 @@ public class DiagnosisSettings {
     private long highErrorRateThreshold;
     private int serverErrorStatusThreshold;
     private int lookbackDays;
+    private long possibleNPlusOneQueryThreshold;
 
     public DiagnosisSettings() {
     }
 
     public DiagnosisSettings(double slowRequestThresholdMs, long highErrorRateThreshold,
-                              int serverErrorStatusThreshold, int lookbackDays) {
+                              int serverErrorStatusThreshold, int lookbackDays,
+                              long possibleNPlusOneQueryThreshold) {
         this.slowRequestThresholdMs = slowRequestThresholdMs;
         this.highErrorRateThreshold = highErrorRateThreshold;
         this.serverErrorStatusThreshold = serverErrorStatusThreshold;
         this.lookbackDays = lookbackDays;
+        this.possibleNPlusOneQueryThreshold = possibleNPlusOneQueryThreshold;
     }
 
     public double getSlowRequestThresholdMs() { return slowRequestThresholdMs; }
@@ -29,4 +32,7 @@ public class DiagnosisSettings {
 
     public int getLookbackDays() { return lookbackDays; }
     public void setLookbackDays(int lookbackDays) { this.lookbackDays = lookbackDays; }
+
+    public long getPossibleNPlusOneQueryThreshold() { return possibleNPlusOneQueryThreshold; }
+    public void setPossibleNPlusOneQueryThreshold(long possibleNPlusOneQueryThreshold) { this.possibleNPlusOneQueryThreshold = possibleNPlusOneQueryThreshold; }
 }
