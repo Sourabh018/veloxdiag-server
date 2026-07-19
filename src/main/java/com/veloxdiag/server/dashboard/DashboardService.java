@@ -1,14 +1,17 @@
 package com.veloxdiag.server.dashboard;
 
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
+import com.veloxdiag.server.diagnosis.EndpointNormalizer;
 import com.veloxdiag.server.entity.Telemetry;
 import com.veloxdiag.server.repository.TelemetryRepository;
-import com.veloxdiag.server.repository.TelemetryRepository.SlowEndpointProjection;
 import com.veloxdiag.server.repository.TelemetryRepository.SummaryProjection;
 
 @Service
@@ -48,11 +51,30 @@ public class DashboardService {
         return telemetryRepository.findByStatusGreaterThanEqualOrderByTimestampDesc(400, pageable);
     }
 
+    // Was a single SQL-level "GROUP BY t.endpoint" query — but that groups by the
+    // raw endpoint string, so /api/exams/{uuid-A} and /api/exams/{uuid-B} showed
+    // up as separate rows with sampleCount 1-2 each instead of being combined
+    // into one /api/exams/{id} row. EndpointNormalizer can't run inside JPQL, so
+    // grouping has to happen in Java instead — same pattern DiagnosisService
+    // already uses for its own endpoint grouping.
     public List<SlowEndpointDTO> getSlowEndpoints(int limit) {
-        Pageable pageable = PageRequest.of(0, limit);
-        List<SlowEndpointProjection> rows = telemetryRepository.findSlowEndpoints(pageable);
-        return rows.stream()
-                .map(r -> new SlowEndpointDTO(r.getEndpoint(), r.getAvgDuration(), r.getCount()))
+        List<Telemetry> all = telemetryRepository.findAll();
+
+        Map<String, List<Telemetry>> byEndpoint = all.stream()
+                .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
+
+        return byEndpoint.entrySet().stream()
+                .map(e -> {
+                    String endpoint = e.getKey();
+                    List<Telemetry> records = e.getValue();
+                    double avgDuration = records.stream()
+                            .mapToLong(Telemetry::getDurationMs)
+                            .average()
+                            .orElse(0.0);
+                    return new SlowEndpointDTO(endpoint, avgDuration, (long) records.size());
+                })
+                .sorted(Comparator.comparingDouble(SlowEndpointDTO::getAvgDuration).reversed())
+                .limit(limit)
                 .toList();
     }
 
