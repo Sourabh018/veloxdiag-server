@@ -1,5 +1,6 @@
 package com.veloxdiag.server.dashboard;
 
+import java.time.LocalDateTime;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -10,6 +11,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
 import com.veloxdiag.server.diagnosis.EndpointNormalizer;
+import com.veloxdiag.server.diagnosis.TelemetryWindowSettings;
 import com.veloxdiag.server.entity.Telemetry;
 import com.veloxdiag.server.repository.TelemetryRepository;
 import com.veloxdiag.server.repository.TelemetryRepository.SummaryProjection;
@@ -18,9 +20,11 @@ import com.veloxdiag.server.repository.TelemetryRepository.SummaryProjection;
 public class DashboardService {
 
     private final TelemetryRepository telemetryRepository;
+    private final TelemetryWindowSettings windowSettings;
 
-    public DashboardService(TelemetryRepository telemetryRepository) {
+    public DashboardService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings) {
         this.telemetryRepository = telemetryRepository;
+        this.windowSettings = windowSettings;
     }
 
     public DashboardSummary getSummary() {
@@ -57,10 +61,16 @@ public class DashboardService {
     // into one /api/exams/{id} row. EndpointNormalizer can't run inside JPQL, so
     // grouping has to happen in Java instead — same pattern DiagnosisService
     // already uses for its own endpoint grouping.
+    //
+    // Also now respects the shared lookback window (TelemetryWindowSettings),
+    // consistent with Diagnosis, Query Analyzer, and Index Advisor — this page
+    // previously scanned all-time data regardless of the Settings window,
+    // which could show stale endpoints that haven't been slow in weeks.
     public List<SlowEndpointDTO> getSlowEndpoints(int limit) {
-        List<Telemetry> all = telemetryRepository.findAll();
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
+        List<Telemetry> recent = telemetryRepository.findByTimestampAfter(cutoff);
 
-        Map<String, List<Telemetry>> byEndpoint = all.stream()
+        Map<String, List<Telemetry>> byEndpoint = recent.stream()
                 .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
 
         return byEndpoint.entrySet().stream()
