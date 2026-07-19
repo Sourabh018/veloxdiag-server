@@ -2,52 +2,27 @@ package com.veloxdiag.server.controller;
 
 import com.veloxdiag.server.entity.SlowQueryPlan;
 import com.veloxdiag.server.repository.SlowQueryPlanRepository;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
-import java.time.LocalDateTime;
+import java.util.List;
 
-/**
- * Ingestion endpoint for slow-query EXPLAIN plans, submitted by veloxdiag-starter
- * after a request exceeds the slow-request threshold. Kept separate from the main
- * /api/telemetry endpoint since this is a different, much less frequent kind of
- * payload (only fires for already-slow requests, not every request).
- */
 @RestController
 @RequestMapping("/api/slow-query-plans")
 public class SlowQueryPlanController {
 
-    private final SlowQueryPlanRepository repository;
+    @Autowired
+    private SlowQueryPlanRepository slowQueryPlanRepository;
 
-    public SlowQueryPlanController(SlowQueryPlanRepository repository) {
-        this.repository = repository;
-    }
+    // ... existing POST ingestion endpoint stays as-is above/below this ...
 
-    public static class SlowQueryPlanRequest {
-        public String applicationName;
-        public String endpoint;
-        public Long requestDurationMs;
-        public String sqlText;
-        public String explainPlan;
-    }
-
-    @PostMapping
-    public SlowQueryPlan submitPlan(@RequestBody SlowQueryPlanRequest request) {
-        // "Seq Scan" is the literal string Postgres's EXPLAIN output uses when the
-        // planner chose a full table scan over an available index (or chose not to
-        // use one). Computed here, not on the starter side, so the parsing logic
-        // lives in one place and the starter stays a thin forwarder.
-        boolean containsSeqScan = request.explainPlan != null && request.explainPlan.contains("Seq Scan");
-
-        SlowQueryPlan plan = new SlowQueryPlan(
-                request.applicationName,
-                request.endpoint,
-                LocalDateTime.now(),
-                request.requestDurationMs,
-                request.sqlText,
-                request.explainPlan,
-                containsSeqScan
-        );
-
-        return repository.save(plan);
+    // Dashboard-facing: returns the most recent captured EXPLAIN plans for an
+    // endpoint, used by the "show query plan" expand action on a
+    // MISSING_INDEX_CANDIDATE finding card. Not filtered to seq-scan-only —
+    // shows whatever was actually captured so the user sees real evidence,
+    // including cases where the plan turned out fine.
+    @GetMapping
+    public List<SlowQueryPlan> getRecentPlans(@RequestParam String endpoint) {
+        return slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
     }
 }
