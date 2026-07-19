@@ -1,12 +1,16 @@
 package com.veloxdiag.server.diagnosis;
 
 import com.veloxdiag.server.diagnosis.engine.RuleEngineService;
+import com.veloxdiag.server.entity.SlowQueryPlan;
 import com.veloxdiag.server.entity.Telemetry;
+import com.veloxdiag.server.repository.SlowQueryPlanRepository;
 import com.veloxdiag.server.repository.TelemetryRepository;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
@@ -18,15 +22,31 @@ public class DiagnosisService {
     private int serverErrorStatusThreshold = 500;
     private long possibleNPlusOneQueryThreshold = 15;
 
+    // A Seq Scan alone isn't a problem — Postgres correctly prefers a full scan
+    // over an index on small tables (confirmed in this project: exams/subjects/
+    // topics all show Seq Scan at 2-77 rows, which is the planner making the
+    // right call, not a missing index). Only flag tables where the row estimate
+    // exceeds this floor, so tiny lookup tables don't generate noisy findings.
+    private long seqScanRowThreshold = 500;
+
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
     private final RuleEngineService ruleEngineService;
+    private final SlowQueryPlanRepository slowQueryPlanRepository;
+
+    // Matches lines like "Seq Scan on exam_questions eq1_0  (cost=0.00..85.02 rows=3202 width=97)"
+    // and also the no-alias form "Seq Scan on exam_questions  (cost=... rows=3202 ...)".
+    // Captures group(1)=table name, group(2)=row estimate.
+    private static final Pattern SEQ_SCAN_PATTERN = Pattern.compile(
+            "Seq Scan on (\\w+)(?:\\s+\\w+)?\\s*\\(cost=[\\d.]+\\.\\.[\\d.]+ rows=(\\d+)"
+    );
 
     public DiagnosisService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings,
-                             RuleEngineService ruleEngineService) {
+                             RuleEngineService ruleEngineService, SlowQueryPlanRepository slowQueryPlanRepository) {
         this.telemetryRepository = telemetryRepository;
         this.windowSettings = windowSettings;
         this.ruleEngineService = ruleEngineService;
+        this.slowQueryPlanRepository = slowQueryPlanRepository;
     }
 
     public double getSlowRequestThresholdMs() { return slowRequestThresholdMs; }
@@ -40,6 +60,9 @@ public class DiagnosisService {
 
     public long getPossibleNPlusOneQueryThreshold() { return possibleNPlusOneQueryThreshold; }
     public void setPossibleNPlusOneQueryThreshold(long value) { this.possibleNPlusOneQueryThreshold = value; }
+
+    public long getSeqScanRowThreshold() { return seqScanRowThreshold; }
+    public void setSeqScanRowThreshold(long value) { this.seqScanRowThreshold = value; }
 
     public List<DiagnosisFinding> runDiagnosis() {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
@@ -58,6 +81,7 @@ public class DiagnosisService {
             endpointFindings.addAll(checkHighErrorRate(endpoint, records));
             endpointFindings.addAll(checkServerErrors(endpoint, records));
             endpointFindings.addAll(checkPossibleNPlusOne(endpoint, records));
+            endpointFindings.addAll(checkMissingIndexCandidate(endpoint, cutoff));
 
             findings.addAll(endpointFindings);
             // Correlation runs after the individual checks for this endpoint, since it
@@ -262,6 +286,73 @@ public class DiagnosisService {
                 evidence,
                 confidence,
                 List.of("SLOW_REQUEST", "POSSIBLE_N_PLUS_ONE")
+        ));
+    }
+
+    /**
+     * Reads EXPLAIN plans captured for this endpoint's slow requests (see
+     * SlowQueryExplainCapture in veloxdiag-starter) and flags tables that got
+     * a Seq Scan AND have a row estimate above seqScanRowThreshold.
+     *
+     * The row-count floor is the important part: a Seq Scan by itself is not
+     * evidence of a missing index. Postgres correctly prefers a full scan over
+     * an index on small tables — confirmed directly in this project, where
+     * exams/subjects/topics all showed Seq Scan at 2-77 rows, which is the
+     * planner making the right call. Only exam_questions (3202 rows) getting a
+     * Seq Scan is a genuine candidate. Without this floor, this rule would
+     * mostly generate noise about tables that don't actually need an index.
+     */
+    private List<DiagnosisFinding> checkMissingIndexCandidate(String endpoint, LocalDateTime cutoff) {
+        List<SlowQueryPlan> plans = slowQueryPlanRepository
+                .findByEndpointAndContainsSeqScanTrueAndTimestampAfter(endpoint, cutoff);
+
+        if (plans.isEmpty()) {
+            return List.of();
+        }
+
+        // Track the largest row estimate seen per table across all plans for
+        // this endpoint, since the same table may appear with slightly
+        // different estimates across different captured requests.
+        Map<String, Long> maxRowsPerTable = new HashMap<>();
+
+        for (SlowQueryPlan plan : plans) {
+            Matcher matcher = SEQ_SCAN_PATTERN.matcher(plan.getExplainPlan());
+            while (matcher.find()) {
+                String table = matcher.group(1);
+                long rows = Long.parseLong(matcher.group(2));
+                maxRowsPerTable.merge(table, rows, Math::max);
+            }
+        }
+
+        Map<String, Long> candidateTables = maxRowsPerTable.entrySet().stream()
+                .filter(e -> e.getValue() > seqScanRowThreshold)
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        if (candidateTables.isEmpty()) {
+            return List.of();
+        }
+
+        String tableSummary = candidateTables.entrySet().stream()
+                .map(e -> e.getKey() + " (~" + e.getValue() + " rows)")
+                .collect(Collectors.joining(", "));
+
+        long maxRows = Collections.max(candidateTables.values());
+        String severity = maxRows > 10000 ? "HIGH" : (maxRows > 2000 ? "MEDIUM" : "LOW");
+
+        Map<String, Object> evidence = new HashMap<>();
+        evidence.put("candidateTables", candidateTables);
+        evidence.put("planSampleCount", plans.size());
+        evidence.put("rowThreshold", seqScanRowThreshold);
+
+        return List.of(new DiagnosisFinding(
+                "MISSING_INDEX_CANDIDATE",
+                severity,
+                endpoint,
+                String.format("Endpoint %s triggers a full table scan (Seq Scan) on: %s. " +
+                                "These tables are large enough that an index on the filtered/joined column " +
+                                "would likely be faster than scanning every row.",
+                        endpoint, tableSummary),
+                evidence
         ));
     }
 }
