@@ -10,6 +10,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
+import com.veloxdiag.server.diagnosis.DiagnosisService;
 import com.veloxdiag.server.diagnosis.EndpointNormalizer;
 import com.veloxdiag.server.diagnosis.TelemetryWindowSettings;
 import com.veloxdiag.server.entity.Telemetry;
@@ -21,10 +22,13 @@ public class DashboardService {
 
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
+    private final DiagnosisService diagnosisService;
 
-    public DashboardService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings) {
+    public DashboardService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings,
+                             DiagnosisService diagnosisService) {
         this.telemetryRepository = telemetryRepository;
         this.windowSettings = windowSettings;
+        this.diagnosisService = diagnosisService;
     }
 
     public DashboardSummary getSummary() {
@@ -66,9 +70,16 @@ public class DashboardService {
     // consistent with Diagnosis, Query Analyzer, and Index Advisor — this page
     // previously scanned all-time data regardless of the Settings window,
     // which could show stale endpoints that haven't been slow in weeks.
+    //
+    // And now actually filters by the live slow-request threshold instead of
+    // just returning the top N slowest endpoints unconditionally — previously
+    // endpoints well under the threshold (e.g. 394ms against a 1000ms threshold)
+    // still showed up here, contradicting the page's own header text
+    // ("Endpoints averaging above the slow-request threshold").
     public List<SlowEndpointDTO> getSlowEndpoints(int limit) {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
         List<Telemetry> recent = telemetryRepository.findByTimestampAfter(cutoff);
+        double threshold = diagnosisService.getSlowRequestThresholdMs();
 
         Map<String, List<Telemetry>> byEndpoint = recent.stream()
                 .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
@@ -83,6 +94,7 @@ public class DashboardService {
                             .orElse(0.0);
                     return new SlowEndpointDTO(endpoint, avgDuration, (long) records.size());
                 })
+                .filter(dto -> dto.getAvgDuration() >= threshold)
                 .sorted(Comparator.comparingDouble(SlowEndpointDTO::getAvgDuration).reversed())
                 .limit(limit)
                 .toList();
