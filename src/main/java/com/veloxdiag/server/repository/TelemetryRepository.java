@@ -38,11 +38,6 @@ public interface TelemetryRepository extends JpaRepository<Telemetry, Long> {
     // error requests, most recent first, capped by Pageable limit
     List<Telemetry> findByStatusGreaterThanEqualOrderByTimestampDesc(Integer status, Pageable pageable);
 
-    // grouped by endpoint, slowest average first
-    @Query("SELECT t.endpoint as endpoint, AVG(t.durationMs) as avgDuration, COUNT(t) as count " +
-           "FROM Telemetry t GROUP BY t.endpoint ORDER BY AVG(t.durationMs) DESC")
-    List<SlowEndpointProjection> findSlowEndpoints(Pageable pageable);
-
     // hourly trend buckets, last N hours (native query, MySQL syntax)
     @Query(value = "SELECT DATE_FORMAT(timestamp, '%Y-%m-%d %H:00:00') as bucket, " +
             "COUNT(*) as requestCount, AVG(duration_ms) as avgDuration, " +
@@ -54,12 +49,6 @@ public interface TelemetryRepository extends JpaRepository<Telemetry, Long> {
 
     // used by Diagnosis, Query Analyzer, and Index Advisor to only scan recent telemetry
     List<Telemetry> findByTimestampAfter(LocalDateTime timestamp);
-
-    public interface SlowEndpointProjection {
-        String getEndpoint();
-        Double getAvgDuration();
-        Long getCount();
-    }
 
     public interface SummaryProjection {
         Long getTotalRequests();
