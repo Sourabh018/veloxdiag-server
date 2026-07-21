@@ -15,7 +15,7 @@ public class IndexAdvisorService {
     private double minAvgDurationMs = 1000.0;
 
     // Need enough samples to trust the variance calculation
-    private static final int MIN_SAMPLE_COUNT = 3;
+    private static final int MIN_SAMPLE_COUNT = 6;
 
     // Coefficient of variation below this = "consistently slow" — now live-configurable via Settings
     // (stdDev / avg — e.g. 0.15 means samples typically vary by only 15% from the average)
