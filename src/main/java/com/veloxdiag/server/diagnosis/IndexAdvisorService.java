@@ -11,15 +11,15 @@ import java.util.stream.Collectors;
 @Service
 public class IndexAdvisorService {
 
-    // Only consider endpoints slow enough to matter
-    private static final double MIN_AVG_DURATION_MS = 1000.0;
+    // Only consider endpoints slow enough to matter — now live-configurable via Settings
+    private double minAvgDurationMs = 1000.0;
 
     // Need enough samples to trust the variance calculation
     private static final int MIN_SAMPLE_COUNT = 3;
 
-    // Coefficient of variation below this = "consistently slow", a candidate for missing-index-style behavior
+    // Coefficient of variation below this = "consistently slow" — now live-configurable via Settings
     // (stdDev / avg — e.g. 0.15 means samples typically vary by only 15% from the average)
-    private static final double LOW_VARIANCE_THRESHOLD = 0.20;
+    private double lowVarianceThreshold = 0.20;
 
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
@@ -28,6 +28,12 @@ public class IndexAdvisorService {
         this.telemetryRepository = telemetryRepository;
         this.windowSettings = windowSettings;
     }
+
+    public double getMinAvgDurationMs() { return minAvgDurationMs; }
+    public void setMinAvgDurationMs(double minAvgDurationMs) { this.minAvgDurationMs = minAvgDurationMs; }
+
+    public double getLowVarianceThreshold() { return lowVarianceThreshold; }
+    public void setLowVarianceThreshold(double lowVarianceThreshold) { this.lowVarianceThreshold = lowVarianceThreshold; }
 
     public List<IndexAdvisorFinding> analyzeCandidates() {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
@@ -48,7 +54,7 @@ public class IndexAdvisorService {
 
             double avg = records.stream().mapToLong(Telemetry::getDurationMs).average().orElse(0.0);
 
-            if (avg < MIN_AVG_DURATION_MS) {
+            if (avg < minAvgDurationMs) {
                 continue; // not slow enough to be worth flagging
             }
 
@@ -59,7 +65,7 @@ public class IndexAdvisorService {
             double stdDev = Math.sqrt(variance);
             double coefficientOfVariation = avg == 0 ? 0 : stdDev / avg;
 
-            if (coefficientOfVariation <= LOW_VARIANCE_THRESHOLD) {
+            if (coefficientOfVariation <= lowVarianceThreshold) {
                 String message = String.format(
                         "Endpoint %s is consistently slow (avg %.0fms, low variance across %d requests). " +
                         "This pattern — slow on every call rather than only under load — is often consistent with a missing database index. " +
@@ -73,7 +79,6 @@ public class IndexAdvisorService {
             }
         }
 
-        // Slowest, most consistent candidates first
         candidates.sort((a, b) -> Double.compare(b.getAvgDurationMs(), a.getAvgDurationMs()));
 
         return candidates;

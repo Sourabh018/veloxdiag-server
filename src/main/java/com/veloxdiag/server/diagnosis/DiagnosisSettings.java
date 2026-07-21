@@ -8,19 +8,24 @@ public class DiagnosisSettings {
     private int lookbackDays;
     private long possibleNPlusOneQueryThreshold;
     private long seqScanRowThreshold;
+    private double minAvgDurationMs;
+    private double lowVarianceThreshold;
 
     public DiagnosisSettings() {
     }
 
     public DiagnosisSettings(double slowRequestThresholdMs, long highErrorRateThreshold,
                               int serverErrorStatusThreshold, int lookbackDays,
-                              long possibleNPlusOneQueryThreshold, long seqScanRowThreshold) {
+                              long possibleNPlusOneQueryThreshold, long seqScanRowThreshold,
+                              double minAvgDurationMs, double lowVarianceThreshold) {
         this.slowRequestThresholdMs = slowRequestThresholdMs;
         this.highErrorRateThreshold = highErrorRateThreshold;
         this.serverErrorStatusThreshold = serverErrorStatusThreshold;
         this.lookbackDays = lookbackDays;
         this.possibleNPlusOneQueryThreshold = possibleNPlusOneQueryThreshold;
         this.seqScanRowThreshold = seqScanRowThreshold;
+        this.minAvgDurationMs = minAvgDurationMs;
+        this.lowVarianceThreshold = lowVarianceThreshold;
     }
 
     public double getSlowRequestThresholdMs() { return slowRequestThresholdMs; }
@@ -40,4 +45,10 @@ public class DiagnosisSettings {
 
     public long getSeqScanRowThreshold() { return seqScanRowThreshold; }
     public void setSeqScanRowThreshold(long seqScanRowThreshold) { this.seqScanRowThreshold = seqScanRowThreshold; }
+
+    public double getMinAvgDurationMs() { return minAvgDurationMs; }
+    public void setMinAvgDurationMs(double minAvgDurationMs) { this.minAvgDurationMs = minAvgDurationMs; }
+
+    public double getLowVarianceThreshold() { return lowVarianceThreshold; }
+    public void setLowVarianceThreshold(double lowVarianceThreshold) { this.lowVarianceThreshold = lowVarianceThreshold; }
 }

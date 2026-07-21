@@ -9,9 +9,10 @@ import jakarta.persistence.Table;
  * restarts/redeploys instead of resetting to hardcoded defaults.
  *
  * Always read/written by fixed id = 1L — this table is never meant to hold
- * more than one row. DiagnosisService and TelemetryWindowSettings remain the
- * live, in-memory source of truth that the diagnosis engines read from; this
- * entity only exists to re-hydrate them on startup.
+ * more than one row. DiagnosisService, TelemetryWindowSettings, and
+ * IndexAdvisorService remain the live, in-memory sources of truth that the
+ * diagnosis engines read from; this entity only exists to re-hydrate them
+ * on startup.
  */
 @Entity
 @Table(name = "app_settings")
@@ -26,13 +27,16 @@ public class AppSettingsEntity {
     private int lookbackDays;
     private long possibleNPlusOneQueryThreshold;
     private long seqScanRowThreshold;
+    private double minAvgDurationMs;
+    private double lowVarianceThreshold;
 
     public AppSettingsEntity() {
     }
 
     public AppSettingsEntity(double slowRequestThresholdMs, long highErrorRateThreshold,
                               int serverErrorStatusThreshold, int lookbackDays,
-                              long possibleNPlusOneQueryThreshold, long seqScanRowThreshold) {
+                              long possibleNPlusOneQueryThreshold, long seqScanRowThreshold,
+                              double minAvgDurationMs, double lowVarianceThreshold) {
         this.id = 1L;
         this.slowRequestThresholdMs = slowRequestThresholdMs;
         this.highErrorRateThreshold = highErrorRateThreshold;
@@ -40,6 +44,8 @@ public class AppSettingsEntity {
         this.lookbackDays = lookbackDays;
         this.possibleNPlusOneQueryThreshold = possibleNPlusOneQueryThreshold;
         this.seqScanRowThreshold = seqScanRowThreshold;
+        this.minAvgDurationMs = minAvgDurationMs;
+        this.lowVarianceThreshold = lowVarianceThreshold;
     }
 
     public Long getId() { return id; }
@@ -62,4 +68,10 @@ public class AppSettingsEntity {
 
     public long getSeqScanRowThreshold() { return seqScanRowThreshold; }
     public void setSeqScanRowThreshold(long seqScanRowThreshold) { this.seqScanRowThreshold = seqScanRowThreshold; }
+
+    public double getMinAvgDurationMs() { return minAvgDurationMs; }
+    public void setMinAvgDurationMs(double minAvgDurationMs) { this.minAvgDurationMs = minAvgDurationMs; }
+
+    public double getLowVarianceThreshold() { return lowVarianceThreshold; }
+    public void setLowVarianceThreshold(double lowVarianceThreshold) { this.lowVarianceThreshold = lowVarianceThreshold; }
 }

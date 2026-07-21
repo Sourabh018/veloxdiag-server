@@ -9,22 +9,26 @@ public class SettingsController {
 
     private final DiagnosisService diagnosisService;
     private final TelemetryWindowSettings windowSettings;
+    private final IndexAdvisorService indexAdvisorService;
     private final AppSettingsRepository appSettingsRepository;
 
     public SettingsController(DiagnosisService diagnosisService,
                                TelemetryWindowSettings windowSettings,
+                               IndexAdvisorService indexAdvisorService,
                                AppSettingsRepository appSettingsRepository) {
         this.diagnosisService = diagnosisService;
         this.windowSettings = windowSettings;
+        this.indexAdvisorService = indexAdvisorService;
         this.appSettingsRepository = appSettingsRepository;
     }
 
     /**
      * Runs once on startup, after Spring has constructed this bean (and therefore
-     * after DiagnosisService/TelemetryWindowSettings already hold their hardcoded
-     * defaults). If a persisted row exists, push it into those in-memory beans so
-     * settings survive a restart/redeploy. If no row exists yet (first boot ever),
-     * persist the current in-memory defaults so there's a baseline row going forward.
+     * after DiagnosisService/TelemetryWindowSettings/IndexAdvisorService already hold
+     * their hardcoded defaults). If a persisted row exists, push it into those
+     * in-memory beans so settings survive a restart/redeploy. If no row exists yet
+     * (first boot ever), persist the current in-memory defaults so there's a
+     * baseline row going forward.
      */
     @PostConstruct
     public void loadPersistedSettings() {
@@ -36,6 +40,8 @@ public class SettingsController {
                     diagnosisService.setPossibleNPlusOneQueryThreshold(saved.getPossibleNPlusOneQueryThreshold());
                     diagnosisService.setSeqScanRowThreshold(saved.getSeqScanRowThreshold());
                     windowSettings.setLookbackDays(saved.getLookbackDays());
+                    indexAdvisorService.setMinAvgDurationMs(saved.getMinAvgDurationMs());
+                    indexAdvisorService.setLowVarianceThreshold(saved.getLowVarianceThreshold());
                 },
                 () -> appSettingsRepository.save(new AppSettingsEntity(
                         diagnosisService.getSlowRequestThresholdMs(),
@@ -43,7 +49,9 @@ public class SettingsController {
                         diagnosisService.getServerErrorStatusThreshold(),
                         windowSettings.getLookbackDays(),
                         diagnosisService.getPossibleNPlusOneQueryThreshold(),
-                        diagnosisService.getSeqScanRowThreshold()
+                        diagnosisService.getSeqScanRowThreshold(),
+                        indexAdvisorService.getMinAvgDurationMs(),
+                        indexAdvisorService.getLowVarianceThreshold()
                 ))
         );
     }
@@ -56,7 +64,9 @@ public class SettingsController {
                 diagnosisService.getServerErrorStatusThreshold(),
                 windowSettings.getLookbackDays(),
                 diagnosisService.getPossibleNPlusOneQueryThreshold(),
-                diagnosisService.getSeqScanRowThreshold()
+                diagnosisService.getSeqScanRowThreshold(),
+                indexAdvisorService.getMinAvgDurationMs(),
+                indexAdvisorService.getLowVarianceThreshold()
         );
     }
 
@@ -70,6 +80,8 @@ public class SettingsController {
         diagnosisService.setPossibleNPlusOneQueryThreshold(settings.getPossibleNPlusOneQueryThreshold());
         diagnosisService.setSeqScanRowThreshold(settings.getSeqScanRowThreshold());
         windowSettings.setLookbackDays(settings.getLookbackDays());
+        indexAdvisorService.setMinAvgDurationMs(settings.getMinAvgDurationMs());
+        indexAdvisorService.setLowVarianceThreshold(settings.getLowVarianceThreshold());
 
         // Persist the same values so they survive the next restart/redeploy.
         appSettingsRepository.save(new AppSettingsEntity(
@@ -78,7 +90,9 @@ public class SettingsController {
                 settings.getServerErrorStatusThreshold(),
                 settings.getLookbackDays(),
                 settings.getPossibleNPlusOneQueryThreshold(),
-                settings.getSeqScanRowThreshold()
+                settings.getSeqScanRowThreshold(),
+                settings.getMinAvgDurationMs(),
+                settings.getLowVarianceThreshold()
         ));
 
         return getSettings();
