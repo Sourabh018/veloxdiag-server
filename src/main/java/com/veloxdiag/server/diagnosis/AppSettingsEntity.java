@@ -25,19 +25,21 @@ public class AppSettingsEntity {
     private int serverErrorStatusThreshold;
     private int lookbackDays;
     private long possibleNPlusOneQueryThreshold;
+    private long seqScanRowThreshold;
 
     public AppSettingsEntity() {
     }
 
     public AppSettingsEntity(double slowRequestThresholdMs, long highErrorRateThreshold,
                               int serverErrorStatusThreshold, int lookbackDays,
-                              long possibleNPlusOneQueryThreshold) {
+                              long possibleNPlusOneQueryThreshold, long seqScanRowThreshold) {
         this.id = 1L;
         this.slowRequestThresholdMs = slowRequestThresholdMs;
         this.highErrorRateThreshold = highErrorRateThreshold;
         this.serverErrorStatusThreshold = serverErrorStatusThreshold;
         this.lookbackDays = lookbackDays;
         this.possibleNPlusOneQueryThreshold = possibleNPlusOneQueryThreshold;
+        this.seqScanRowThreshold = seqScanRowThreshold;
     }
 
     public Long getId() { return id; }
@@ -57,4 +59,7 @@ public class AppSettingsEntity {
 
     public long getPossibleNPlusOneQueryThreshold() { return possibleNPlusOneQueryThreshold; }
     public void setPossibleNPlusOneQueryThreshold(long possibleNPlusOneQueryThreshold) { this.possibleNPlusOneQueryThreshold = possibleNPlusOneQueryThreshold; }
+
+    public long getSeqScanRowThreshold() { return seqScanRowThreshold; }
+    public void setSeqScanRowThreshold(long seqScanRowThreshold) { this.seqScanRowThreshold = seqScanRowThreshold; }
 }

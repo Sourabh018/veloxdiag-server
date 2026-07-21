@@ -34,6 +34,7 @@ public class SettingsController {
                     diagnosisService.setHighErrorRateThreshold(saved.getHighErrorRateThreshold());
                     diagnosisService.setServerErrorStatusThreshold(saved.getServerErrorStatusThreshold());
                     diagnosisService.setPossibleNPlusOneQueryThreshold(saved.getPossibleNPlusOneQueryThreshold());
+                    diagnosisService.setSeqScanRowThreshold(saved.getSeqScanRowThreshold());
                     windowSettings.setLookbackDays(saved.getLookbackDays());
                 },
                 () -> appSettingsRepository.save(new AppSettingsEntity(
@@ -41,7 +42,8 @@ public class SettingsController {
                         diagnosisService.getHighErrorRateThreshold(),
                         diagnosisService.getServerErrorStatusThreshold(),
                         windowSettings.getLookbackDays(),
-                        diagnosisService.getPossibleNPlusOneQueryThreshold()
+                        diagnosisService.getPossibleNPlusOneQueryThreshold(),
+                        diagnosisService.getSeqScanRowThreshold()
                 ))
         );
     }
@@ -53,7 +55,8 @@ public class SettingsController {
                 diagnosisService.getHighErrorRateThreshold(),
                 diagnosisService.getServerErrorStatusThreshold(),
                 windowSettings.getLookbackDays(),
-                diagnosisService.getPossibleNPlusOneQueryThreshold()
+                diagnosisService.getPossibleNPlusOneQueryThreshold(),
+                diagnosisService.getSeqScanRowThreshold()
         );
     }
 
@@ -65,6 +68,7 @@ public class SettingsController {
         diagnosisService.setHighErrorRateThreshold(settings.getHighErrorRateThreshold());
         diagnosisService.setServerErrorStatusThreshold(settings.getServerErrorStatusThreshold());
         diagnosisService.setPossibleNPlusOneQueryThreshold(settings.getPossibleNPlusOneQueryThreshold());
+        diagnosisService.setSeqScanRowThreshold(settings.getSeqScanRowThreshold());
         windowSettings.setLookbackDays(settings.getLookbackDays());
 
         // Persist the same values so they survive the next restart/redeploy.
@@ -73,7 +77,8 @@ public class SettingsController {
                 settings.getHighErrorRateThreshold(),
                 settings.getServerErrorStatusThreshold(),
                 settings.getLookbackDays(),
-                settings.getPossibleNPlusOneQueryThreshold()
+                settings.getPossibleNPlusOneQueryThreshold(),
+                settings.getSeqScanRowThreshold()
         ));
 
         return getSettings();
