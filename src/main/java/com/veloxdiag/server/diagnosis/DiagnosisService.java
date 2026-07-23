@@ -29,6 +29,14 @@ public class DiagnosisService {
     // exceeds this floor, so tiny lookup tables don't generate noisy findings.
     private long seqScanRowThreshold = 500;
 
+    // Addendum v1.2 / Section 10.1: mirrors IndexAdvisorService's MIN_SAMPLE_COUNT.
+    // Below this many samples, a HIGH/MEDIUM severity finding overstates the
+    // confidence the underlying data actually supports (e.g. a HIGH Slow Request
+    // off 2 samples could just be a cold-start fluke). We don't suppress the
+    // finding — the signal may still be real — we downgrade severity to LOW and
+    // annotate the message and evidence so a reader isn't misled about confidence.
+    private static final long MIN_SAMPLE_COUNT = 6;
+
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
     private final RuleEngineService ruleEngineService;
@@ -105,19 +113,25 @@ public class DiagnosisService {
                 .orElse(0.0);
 
         if (avgDuration > slowRequestThresholdMs) {
-            String severity = avgDuration > 5000 ? "HIGH" : (avgDuration > 2000 ? "MEDIUM" : "LOW");
+            boolean insufficientSamples = records.size() < MIN_SAMPLE_COUNT;
+            String severity = insufficientSamples
+                    ? "LOW"
+                    : (avgDuration > 5000 ? "HIGH" : (avgDuration > 2000 ? "MEDIUM" : "LOW"));
+
             Map<String, Object> evidence = new HashMap<>();
             evidence.put("averageDurationMs", avgDuration);
             evidence.put("sampleCount", records.size());
+            evidence.put("insufficientSampleSize", insufficientSamples);
 
-            return List.of(new DiagnosisFinding(
-                    "SLOW_REQUEST",
-                    severity,
-                    endpoint,
-                    String.format("Endpoint %s is averaging %.0fms per request, above the %.0fms threshold.",
-                            endpoint, avgDuration, slowRequestThresholdMs),
-                    evidence
-            ));
+            String message = insufficientSamples
+                    ? String.format("Endpoint %s is averaging %.0fms per request, above the %.0fms threshold — " +
+                                    "but this is based on only %d sample(s), too few to reliably call this a systemic " +
+                                    "slowdown rather than a one-off (e.g. cold start).",
+                            endpoint, avgDuration, slowRequestThresholdMs, records.size())
+                    : String.format("Endpoint %s is averaging %.0fms per request, above the %.0fms threshold.",
+                            endpoint, avgDuration, slowRequestThresholdMs);
+
+            return List.of(new DiagnosisFinding("SLOW_REQUEST", severity, endpoint, message, evidence));
         }
         return List.of();
     }
@@ -184,21 +198,27 @@ public class DiagnosisService {
         // (e.g. more rows returned -> more per-row queries), so a handful of
         // cheap requests can mask a genuine N+1 spike if we only look at the mean.
         if (maxQueryCount > possibleNPlusOneQueryThreshold) {
-            String severity = maxQueryCount > 50 ? "HIGH" : (maxQueryCount > 25 ? "MEDIUM" : "LOW");
+            boolean insufficientSamples = counts.size() < MIN_SAMPLE_COUNT;
+            String severity = insufficientSamples
+                    ? "LOW"
+                    : (maxQueryCount > 50 ? "HIGH" : (maxQueryCount > 25 ? "MEDIUM" : "LOW"));
+
             Map<String, Object> evidence = new HashMap<>();
             evidence.put("averageQueryCount", avgQueryCount);
             evidence.put("maxQueryCount", maxQueryCount);
             evidence.put("sampleCount", counts.size());
+            evidence.put("insufficientSampleSize", insufficientSamples);
 
-            return List.of(new DiagnosisFinding(
-                    "POSSIBLE_N_PLUS_ONE",
-                    severity,
-                    endpoint,
-                    String.format("Endpoint %s spiked to %d SQL queries in at least one request (average %.1f across %d samples), " +
+            String message = insufficientSamples
+                    ? String.format("Endpoint %s spiked to %d SQL queries in at least one request (average %.1f), " +
+                                    "suggesting an N+1 query pattern — but only %d sample(s) with a query count were " +
+                                    "observed, too few to confirm this is a recurring pattern rather than a single event.",
+                            endpoint, maxQueryCount, avgQueryCount, counts.size())
+                    : String.format("Endpoint %s spiked to %d SQL queries in at least one request (average %.1f across %d samples), " +
                                     "suggesting an N+1 query pattern rather than a single efficient fetch.",
-                            endpoint, maxQueryCount, avgQueryCount, counts.size()),
-                    evidence
-            ));
+                            endpoint, maxQueryCount, avgQueryCount, counts.size());
+
+            return List.of(new DiagnosisFinding("POSSIBLE_N_PLUS_ONE", severity, endpoint, message, evidence));
         }
         return List.of();
     }
@@ -215,6 +235,13 @@ public class DiagnosisService {
      * endpoint). We deliberately avoid inventing a numeric percentage — a HIGH/MEDIUM/LOW
      * label backed by an actual measured ratio is honest; a fabricated "87% confidence"
      * would not be.
+     *
+     * Addendum v1.2 / Section 10.2: the ratio branch used to be binary (>=2.0 -> HIGH,
+     * else MEDIUM), which meant a ratio at or below 1.0 — spiky requests actually
+     * FASTER than normal ones, i.e. data pointing the opposite direction from the
+     * claim — still got a MEDIUM-confidence "is likely driven by" message. That's a
+     * self-contradictory finding. This is now a three-way branch so the label and
+     * wording track the direction of the evidence, not just whether both findings fired.
      */
     private List<DiagnosisFinding> correlateFindings(String endpoint, List<Telemetry> records,
                                                        List<DiagnosisFinding> endpointFindings) {
@@ -250,7 +277,13 @@ public class DiagnosisService {
         String confidence;
         String message;
 
-        if (spikyAvgDurationOpt.isPresent() && normalAvgDurationOpt.isPresent() && normalRecords.size() >= 3) {
+        // Addendum v1.2 / Section 10.1: require a real baseline before trusting the
+        // ratio at all — mirrors MIN_SAMPLE_COUNT used elsewhere in this file, not
+        // the old ad-hoc ">= 3" spot-check.
+        boolean hasReliableBaseline = spikyAvgDurationOpt.isPresent() && normalAvgDurationOpt.isPresent()
+                && normalRecords.size() >= MIN_SAMPLE_COUNT;
+
+        if (hasReliableBaseline) {
             double spikyAvg = spikyAvgDurationOpt.getAsDouble();
             double normalAvg = normalAvgDurationOpt.getAsDouble();
             double ratio = normalAvg > 0 ? spikyAvg / normalAvg : 0;
@@ -259,23 +292,46 @@ public class DiagnosisService {
             evidence.put("normalAvgDurationMs", normalAvg);
             evidence.put("durationRatio", ratio);
 
-            // HIGH: spiky requests are at least 2x slower than normal ones on the
-            // same endpoint — a real, measured difference, not just co-occurrence.
-            confidence = ratio >= 2.0 ? "HIGH" : "MEDIUM";
-            message = String.format(
-                    "High duration on %s is likely driven by its N+1 query pattern: requests with more than %d queries " +
-                            "averaged %.0fms (n=%d) vs %.0fms (n=%d) for requests at or below that threshold — roughly %.1fx slower.",
-                    endpoint, possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
+            if (ratio >= 2.0) {
+                // Spiky requests are at least 2x slower than normal ones on the same
+                // endpoint — a real, measured difference, not just co-occurrence.
+                confidence = "HIGH";
+                message = String.format(
+                        "High duration on %s is likely driven by its N+1 query pattern: requests with more than %d queries " +
+                                "averaged %.0fms (n=%d) vs %.0fms (n=%d) for requests at or below that threshold — roughly %.1fx slower.",
+                        endpoint, possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
+            } else if (ratio > 1.0) {
+                // Directionally consistent (spiky requests are slower) but the gap is
+                // modest — a weaker, still honest claim than "is likely driven by".
+                confidence = "MEDIUM";
+                message = String.format(
+                        "High duration on %s may be partially driven by its N+1 query pattern: requests with more than %d queries " +
+                                "averaged %.0fms (n=%d) vs %.0fms (n=%d) for requests at or below that threshold — roughly %.1fx slower, " +
+                                "a modest but directionally consistent difference.",
+                        endpoint, possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
+            } else {
+                // ratio <= 1.0: spiky requests were AT OR BELOW normal duration —
+                // the data points the opposite way from a causal link. Report this
+                // honestly rather than asserting a link the numbers contradict.
+                confidence = "LOW";
+                message = String.format(
+                        "Both SLOW_REQUEST and POSSIBLE_N_PLUS_ONE fired for %s, but the N+1 pattern does not appear to be " +
+                                "the primary driver of the slowness: requests with more than %d queries averaged %.0fms (n=%d) vs " +
+                                "%.0fms (n=%d) for requests at or below that threshold — roughly %.1fx, i.e. no slower (or faster). " +
+                                "The two findings likely have separate causes.",
+                        endpoint, possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
+            }
         } else {
             // Both findings fired, but we don't have enough of a baseline (e.g. every
             // sample was a spike, or too few normal-range samples) to measure a ratio.
             // Still worth surfacing the correlation, just with lower confidence and an
             // honest note about why.
             confidence = "MEDIUM";
+            evidence.put("insufficientSampleSize", true);
             message = String.format(
                     "SLOW_REQUEST and POSSIBLE_N_PLUS_ONE both fired for %s, suggesting a link between query volume and " +
-                            "duration, but there weren't enough normal-range samples on this endpoint to measure the exact ratio.",
-                    endpoint);
+                            "duration, but there weren't enough normal-range samples (need >= %d) on this endpoint to measure the exact ratio.",
+                    endpoint, MIN_SAMPLE_COUNT);
         }
 
         return List.of(new DiagnosisFinding(
