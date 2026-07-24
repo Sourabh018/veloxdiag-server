@@ -10,6 +10,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
+import com.veloxdiag.server.diagnosis.DiagnosisFinding;
 import com.veloxdiag.server.diagnosis.DiagnosisService;
 import com.veloxdiag.server.diagnosis.EndpointNormalizer;
 import com.veloxdiag.server.diagnosis.TelemetryWindowSettings;
@@ -19,6 +20,15 @@ import com.veloxdiag.server.repository.TelemetryRepository.SummaryProjection;
 
 @Service
 public class DashboardService {
+
+    // Weighted point deduction per active finding, by severity. Chosen to be
+    // simple and explainable in one sentence (no hidden ML/black-box scoring):
+    // a single HIGH finding meaningfully dents the score, a handful of LOWs
+    // barely move it. Floored at 0 so a very broken app doesn't go negative.
+    private static final int HIGH_PENALTY = 15;
+    private static final int MEDIUM_PENALTY = 7;
+    private static final int LOW_PENALTY = 2;
+    private static final int STARTING_SCORE = 100;
 
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
@@ -40,13 +50,37 @@ public class DashboardService {
         double averageResponseTime = stats.getAverageResponseTime() == null ? 0.0 : stats.getAverageResponseTime();
         long errorRequests = stats.getErrorRequests() == null ? 0L : stats.getErrorRequests();
         long connectedApplications = stats.getConnectedApplications() == null ? 0L : stats.getConnectedApplications();
+        int healthScore = computeHealthScore();
 
         return new DashboardSummary(
                 totalRequests,
                 averageResponseTime,
                 errorRequests,
-                connectedApplications
+                connectedApplications,
+                healthScore
         );
+    }
+
+    // Reuses the same diagnosis engine that powers the Diagnosis page — the
+    // score is a direct function of the same findings a person would see if
+    // they clicked through, not a separately-computed metric that could drift
+    // out of sync with what the Diagnosis page actually reports.
+    private int computeHealthScore() {
+        List<DiagnosisFinding> findings = diagnosisService.runDiagnosis();
+
+        int deduction = 0;
+        for (DiagnosisFinding finding : findings) {
+            String severity = finding.getSeverity();
+            if ("HIGH".equals(severity)) {
+                deduction += HIGH_PENALTY;
+            } else if ("MEDIUM".equals(severity)) {
+                deduction += MEDIUM_PENALTY;
+            } else if ("LOW".equals(severity)) {
+                deduction += LOW_PENALTY;
+            }
+        }
+
+        return Math.max(0, STARTING_SCORE - deduction);
     }
 
     public List<Telemetry> getRecent(int limit) {
