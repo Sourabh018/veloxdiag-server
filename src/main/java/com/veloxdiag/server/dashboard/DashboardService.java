@@ -15,7 +15,6 @@ import com.veloxdiag.server.diagnosis.DiagnosisService;
 import com.veloxdiag.server.diagnosis.EndpointNormalizer;
 import com.veloxdiag.server.diagnosis.TelemetryWindowSettings;
 import com.veloxdiag.server.entity.Telemetry;
-import com.veloxdiag.server.diagnosis.EndpointNormalizer;
 import com.veloxdiag.server.repository.TelemetryRepository;
 import com.veloxdiag.server.repository.TelemetryRepository.SummaryProjection;
 
@@ -26,12 +25,11 @@ public class DashboardService {
     // simple and explainable in one sentence (no hidden ML/black-box scoring):
     // a single HIGH finding meaningfully dents the score, a handful of LOWs
     // barely move it. Floored at 0 so a very broken app doesn't go negative.
-	private static final int HIGH_PENALTY = 15;
+    private static final int HIGH_PENALTY = 15;
     private static final int MEDIUM_PENALTY = 7;
     private static final int LOW_PENALTY = 2;
     private static final int STARTING_SCORE = 100;
     private static final int MAX_DEDUCTION_PER_ENDPOINT = 30;
-    private static final int LOOKBACK_DAYS_UNUSED_PLACEHOLDER = 0; // (ignore — not a real change, see below)
 
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
@@ -45,8 +43,6 @@ public class DashboardService {
     }
 
     public DashboardSummary getSummary() {
-        // Was 4 separate queries (getTotalRequests, getAverageResponseTime,
-        // getErrorRequests, getConnectedApplications) — now 1.
         SummaryProjection stats = telemetryRepository.getSummaryStats();
 
         long totalRequests = stats.getTotalRequests() == null ? 0L : stats.getTotalRequests();
@@ -64,7 +60,7 @@ public class DashboardService {
         );
     }
 
- // Averages per-endpoint deduction across ALL endpoints seen in the current
+    // Averages per-endpoint deduction across ALL endpoints seen in the current
     // window (including ones with zero findings), rather than summing capped
     // deductions directly. Summing meant the score could still collapse to 0
     // once you simply had enough endpoints each near the per-endpoint cap —
@@ -106,9 +102,6 @@ public class DashboardService {
             totalDeduction += Math.min(endpointDeduction, MAX_DEDUCTION_PER_ENDPOINT);
         }
 
-        // Endpoints with zero findings contribute 0 to totalDeduction but still
-        // count in totalEndpointCount — this is what pulls the average down
-        // when most of the app is actually healthy.
         double averageDeduction = (double) totalDeduction / totalEndpointCount;
 
         return Math.max(0, (int) Math.round(STARTING_SCORE - averageDeduction));
@@ -124,23 +117,6 @@ public class DashboardService {
         return telemetryRepository.findByStatusGreaterThanEqualOrderByTimestampDesc(400, pageable);
     }
 
-    // Was a single SQL-level "GROUP BY t.endpoint" query — but that groups by the
-    // raw endpoint string, so /api/exams/{uuid-A} and /api/exams/{uuid-B} showed
-    // up as separate rows with sampleCount 1-2 each instead of being combined
-    // into one /api/exams/{id} row. EndpointNormalizer can't run inside JPQL, so
-    // grouping has to happen in Java instead — same pattern DiagnosisService
-    // already uses for its own endpoint grouping.
-    //
-    // Also now respects the shared lookback window (TelemetryWindowSettings),
-    // consistent with Diagnosis, Query Analyzer, and Index Advisor — this page
-    // previously scanned all-time data regardless of the Settings window,
-    // which could show stale endpoints that haven't been slow in weeks.
-    //
-    // And now actually filters by the live slow-request threshold instead of
-    // just returning the top N slowest endpoints unconditionally — previously
-    // endpoints well under the threshold (e.g. 394ms against a 1000ms threshold)
-    // still showed up here, contradicting the page's own header text
-    // ("Endpoints averaging above the slow-request threshold").
     public List<SlowEndpointDTO> getSlowEndpoints(int limit) {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
         List<Telemetry> recent = telemetryRepository.findByTimestampAfter(cutoff);
