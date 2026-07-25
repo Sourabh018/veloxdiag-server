@@ -116,7 +116,16 @@ public class NarrativeService {
         part.put("text", fullPrompt);
 
         ObjectNode generationConfig = root.putObject("generationConfig");
-        generationConfig.put("maxOutputTokens", 300);
+        generationConfig.put("maxOutputTokens", 500);
+
+        // gemini-flash-latest is a "thinking" model by default — it spends output
+        // tokens on internal reasoning steps before writing the actual answer.
+        // For this task (a short templated summary of already-computed findings,
+        // not multi-step reasoning) that thinking budget just eats into
+        // maxOutputTokens and truncates the real response. Disabling it here
+        // guarantees the full token budget goes to the actual narrative text.
+        ObjectNode thinkingConfig = generationConfig.putObject("thinkingConfig");
+        thinkingConfig.put("thinkingBudget", 0);
 
         return objectMapper.writeValueAsString(root);
     }
