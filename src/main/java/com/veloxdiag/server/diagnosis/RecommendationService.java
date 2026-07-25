@@ -131,11 +131,14 @@ public class RecommendationService {
                 return null;
 
             default:
+                // No wrapper phrasing ("Custom rule triggered — no specific fix template
+                // available yet...") — that was boilerplate identical for every custom rule
+                // and added nothing the "Custom Rule" chip on the card doesn't already say.
+                // Show the finding's own real message directly.
                 return new Recommendation(
                         endpoint, finding.getSeverity(), finding.getRuleType(),
-                        "Custom rule triggered — no specific fix template available yet",
-                        "This finding comes from a custom rule (\"" + finding.getRuleType() + "\") without a " +
-                        "built-in recommendation template. Underlying finding: " + finding.getMessage(),
+                        finding.getMessage(),
+                        null,
                         finding.getEvidence(),
                         null, false, relatedFindings
                 );
