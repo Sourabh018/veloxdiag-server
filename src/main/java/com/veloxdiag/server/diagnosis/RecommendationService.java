@@ -65,32 +65,52 @@ public class RecommendationService {
         this.objectMapper = new ObjectMapper();
     }
 
-    public List<Recommendation> getRecommendations() {
+    public Map<String, List<Recommendation>> getRecommendations() {
         List<DiagnosisFinding> allFindings = diagnosisService.runDiagnosis();
 
         Map<String, List<DiagnosisFinding>> byEndpoint = allFindings.stream()
                 .collect(Collectors.groupingBy(DiagnosisFinding::getEndpoint));
 
-        List<Recommendation> recommendations = new ArrayList<>();
+        // Endpoint -> its recommendations. LinkedHashMap so insertion order (which we
+        // control below) survives into the JSON response — the frontend renders
+        // sections in whatever key order the object has.
+        Map<String, List<Recommendation>> byEndpointRecs = new LinkedHashMap<>();
 
+        // First pass: build every recommendation, grouped, unsorted.
+        Map<String, List<Recommendation>> raw = new LinkedHashMap<>();
         for (Map.Entry<String, List<DiagnosisFinding>> entry : byEndpoint.entrySet()) {
             String endpoint = entry.getKey();
             List<String> ruleTypes = entry.getValue().stream()
                     .map(DiagnosisFinding::getRuleType)
                     .collect(Collectors.toList());
 
+            List<Recommendation> recsForEndpoint = new ArrayList<>();
             for (DiagnosisFinding finding : entry.getValue()) {
                 Recommendation rec = buildRecommendation(endpoint, finding, ruleTypes);
                 if (rec != null) {
-                    recommendations.add(rec);
+                    recsForEndpoint.add(rec);
                 }
+            }
+            if (!recsForEndpoint.isEmpty()) {
+                raw.put(endpoint, recsForEndpoint);
             }
         }
 
-        // Worst first
-        recommendations.sort((a, b) -> severityRank(b.getSeverity()) - severityRank(a.getSeverity()));
+        // Order endpoints worst-severity-first (by that endpoint's single worst recommendation),
+        // sort each endpoint's own recommendation list worst-first too.
+        raw.entrySet().stream()
+                .sorted((a, b) -> worstSeverity(b.getValue()) - worstSeverity(a.getValue()))
+                .forEach(e -> {
+                    List<Recommendation> sorted = new ArrayList<>(e.getValue());
+                    sorted.sort((a, b) -> severityRank(b.getSeverity()) - severityRank(a.getSeverity()));
+                    byEndpointRecs.put(e.getKey(), sorted);
+                });
 
-        return recommendations;
+        return byEndpointRecs;
+    }
+
+    private int worstSeverity(List<Recommendation> recs) {
+        return recs.stream().mapToInt(r -> severityRank(r.getSeverity())).max().orElse(0);
     }
 
     private Recommendation buildRecommendation(String endpoint, DiagnosisFinding finding, List<String> relatedFindings) {
@@ -108,6 +128,7 @@ public class RecommendationService {
                         "query, an @EntityGraph on the method, or a batch-fetch-size hint — whichever fits " +
                         "the actual relationship being loaded. VeloxDiag doesn't know the exact entity, so " +
                         "verify against the repository method backing this endpoint before applying.",
+                        finding.getEvidence(),
                         "// Example — replace the per-row lookup with a single fetch join:\n" +
                         "@Query(\"SELECT e FROM Entity e JOIN FETCH e.relatedEntity WHERE ...\")",
                         false, relatedFindings
@@ -126,6 +147,7 @@ public class RecommendationService {
                         "index pattern. The cause is likely outside the database layer: an external API call, " +
                         "serialization overhead, or synchronous work that could be made async. Check the " +
                         "Query Analyzer and Slow Queries pages for this endpoint for more evidence before guessing further.",
+                        finding.getEvidence(),
                         null, false, relatedFindings
                 );
 
@@ -147,6 +169,7 @@ public class RecommendationService {
                         "Custom rule triggered — no specific fix template available yet",
                         "This finding comes from a custom rule (\"" + finding.getRuleType() + "\") without a " +
                         "built-in recommendation template. Underlying finding: " + finding.getMessage(),
+                        finding.getEvidence(),
                         null, false, relatedFindings
                 );
         }
@@ -167,7 +190,7 @@ public class RecommendationService {
         if (seqScanPlan == null || apiKey == null || apiKey.isBlank()) {
             return new Recommendation(endpoint, finding.getSeverity(), finding.getRuleType(),
                     "Add a database index — pattern suggests a missing index",
-                    genericDetail, genericCode, false, relatedFindings);
+                    genericDetail, finding.getEvidence(), genericCode, false, relatedFindings);
         }
 
         try {
@@ -177,6 +200,7 @@ public class RecommendationService {
                 return new Recommendation(endpoint, finding.getSeverity(), finding.getRuleType(),
                         "Add a database index — suggested statement below",
                         parts[1] != null ? parts[1] : genericDetail,
+                        finding.getEvidence(),
                         parts[0] != null ? parts[0] : genericCode,
                         parts[0] != null, relatedFindings);
             }
@@ -186,7 +210,7 @@ public class RecommendationService {
 
         return new Recommendation(endpoint, finding.getSeverity(), finding.getRuleType(),
                 "Add a database index — pattern suggests a missing index",
-                genericDetail, genericCode, false, relatedFindings);
+                genericDetail, finding.getEvidence(), genericCode, false, relatedFindings);
     }
 
     private String callGeminiForIndex(SlowQueryPlan plan) throws Exception {
