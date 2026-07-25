@@ -73,8 +73,10 @@ public class NarrativeService {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
             if (response.statusCode() != 200) {
+                String rawBody = response.body();
+                String truncated = rawBody.length() > 300 ? rawBody.substring(0, 300) : rawBody;
                 return new EndpointNarrative(endpoint,
-                        "Narrative generation failed (API returned status " + response.statusCode() + ").",
+                        "Narrative generation failed (status " + response.statusCode() + "): " + truncated,
                         ruleTypes);
             }
 
