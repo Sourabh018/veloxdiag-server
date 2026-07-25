@@ -322,7 +322,7 @@ public class RecommendationService {
         ArrayNode parts = contentEntry.putArray("parts");
         parts.addObject().put("text", prompt);
         ObjectNode generationConfig = root.putObject("generationConfig");
-        generationConfig.put("maxOutputTokens", 900);
+        generationConfig.put("maxOutputTokens", 1500);
         // Stops gemini-flash-latest's internal "thinking" tokens from eating into
         // maxOutputTokens and truncating the actual suggestion mid-sentence —
         // the real fix, instead of raising the token cap again each time this shows up.
@@ -345,6 +345,8 @@ public class RecommendationService {
                 JsonNode responseRoot = objectMapper.readTree(response.body());
                 JsonNode candidates = responseRoot.path("candidates");
                 if (candidates.isArray() && candidates.size() > 0) {
+                    String finishReason = candidates.get(0).path("finishReason").asText("UNKNOWN");
+                    System.out.println("[VeloxDiag] Gemini suggestion finishReason=" + finishReason);
                     JsonNode textParts = candidates.get(0).path("content").path("parts");
                     if (textParts.isArray() && textParts.size() > 0) {
                         String text = textParts.get(0).path("text").asText();
