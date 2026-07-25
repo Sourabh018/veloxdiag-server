@@ -219,6 +219,122 @@ public class RecommendationService {
         return v == null ? null : String.valueOf(v);
     }
 
+    private static final String SUGGESTION_SYSTEM_PROMPT =
+            "You are a senior backend engineer giving a concrete fix suggestion for one specific finding on " +
+            "one specific API endpoint. You are given the rule type, severity, message, and real measured " +
+            "evidence (sample counts, averages, maximums, durations — whatever is present). Write 2-4 " +
+            "sentences of concrete, endpoint-specific advice that references the actual numbers given — " +
+            "do not write generic boilerplate that could apply to any endpoint. Do not invent an entity, " +
+            "table, or column name that isn't present in the input; keep code examples generic/illustrative " +
+            "if the real schema isn't known. If the evidence is borderline or inconclusive (e.g. sample size " +
+            "close to the minimum, or the effect size is small), say so plainly rather than overstating the fix.";
+
+    /**
+     * On-demand, tailored version of the suggestion — mirrors NarrativeService's
+     * "Explain this" pattern. Called lazily from the dashboard, not baked into
+     * the default getRecommendations() response. Falls back to the existing
+     * static template text (via buildRecommendation) if the key pool is empty,
+     * the finding can't be found, or the call fails — never blocks the UI.
+     */
+    public RecommendationExplanation generateAiSuggestion(String endpoint, String ruleType) {
+        List<DiagnosisFinding> findings = diagnosisService.getFindingsForEndpoint(endpoint);
+        DiagnosisFinding finding = findings.stream()
+                .filter(f -> f.getRuleType().equals(ruleType))
+                .findFirst()
+                .orElse(null);
+
+        if (finding == null) {
+            return new RecommendationExplanation(endpoint, ruleType,
+                    "No active finding of this type was found for this endpoint — it may have been resolved.",
+                    false);
+        }
+
+        String fallbackText;
+        try {
+            fallbackText = fallbackSuggestionText(endpoint, finding, findings);
+        } catch (Exception e) {
+            // buildRecommendation() can hit the DB (MISSING_INDEX_CANDIDATE path queries
+            // SlowQueryPlanRepository) — never let that 500 the whole /explain endpoint.
+            fallbackText = "No fix template available for this finding.";
+        }
+
+        if (!keyRotator.hasKeys()) {
+            return new RecommendationExplanation(endpoint, ruleType, fallbackText, false);
+        }
+
+        String prompt = SUGGESTION_SYSTEM_PROMPT + "\n\n" +
+                "Endpoint: " + endpoint + "\n" +
+                "Rule type: " + finding.getRuleType() + "\n" +
+                "Severity: " + finding.getSeverity() + "\n" +
+                "Message: " + finding.getMessage() + "\n" +
+                (finding.getEvidence() != null ? "Evidence: " + finding.getEvidence() + "\n" : "");
+
+        try {
+            String result = callGeminiForSuggestion(prompt);
+            if (result != null && !result.isBlank()) {
+                return new RecommendationExplanation(endpoint, ruleType, result, true);
+            }
+        } catch (Exception e) {
+            // fall through to fallback text below
+        }
+
+        return new RecommendationExplanation(endpoint, ruleType, fallbackText, false);
+    }
+
+    // Reuses the existing deterministic message text as the fallback, so the
+    // fallback path still shows real numbers (see buildNPlusOneRecommendation /
+    // buildSlowRequestRecommendation) rather than a separate hardcoded string.
+    private String fallbackSuggestionText(String endpoint, DiagnosisFinding finding, List<DiagnosisFinding> relatedFindingsRaw) {
+        List<String> relatedFindings = relatedFindingsRaw.stream()
+                .map(DiagnosisFinding::getRuleType)
+                .collect(Collectors.toList());
+        Recommendation rec = buildRecommendation(endpoint, finding, relatedFindings);
+        return rec != null ? rec.getMessage() : "No fix template available for this finding.";
+    }
+
+    private String callGeminiForSuggestion(String prompt) throws Exception {
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode contents = root.putArray("contents");
+        ObjectNode contentEntry = contents.addObject();
+        ArrayNode parts = contentEntry.putArray("parts");
+        parts.addObject().put("text", prompt);
+        ObjectNode generationConfig = root.putObject("generationConfig");
+        generationConfig.put("maxOutputTokens", 400);
+        String requestBody = objectMapper.writeValueAsString(root);
+
+        int attempts = Math.max(1, keyRotator.keyCount());
+        for (int i = 0; i < attempts; i++) {
+            String url = String.format(API_URL_TEMPLATE, keyRotator.current());
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .timeout(Duration.ofSeconds(30))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() == 200) {
+                JsonNode responseRoot = objectMapper.readTree(response.body());
+                JsonNode candidates = responseRoot.path("candidates");
+                if (candidates.isArray() && candidates.size() > 0) {
+                    JsonNode textParts = candidates.get(0).path("content").path("parts");
+                    if (textParts.isArray() && textParts.size() > 0) {
+                        String text = textParts.get(0).path("text").asText();
+                        return text.isBlank() ? null : text.trim();
+                    }
+                }
+                return null;
+            }
+
+            if (response.statusCode() == 429 && keyRotator.rotate()) {
+                continue;
+            }
+            return null;
+        }
+        return null;
+    }
+
     private Recommendation buildIndexRecommendation(String endpoint, DiagnosisFinding finding, List<String> relatedFindings) {
         String genericDetail =
                 "This endpoint is consistently slow on every call rather than only under load — a pattern " +
