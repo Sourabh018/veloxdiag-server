@@ -1,6 +1,7 @@
 package com.veloxdiag.server.diagnosis;
 
 import com.veloxdiag.server.diagnosis.engine.RuleEngineService;
+import com.veloxdiag.server.entity.SlowQueryPlan;
 import com.veloxdiag.server.entity.Telemetry;
 import com.veloxdiag.server.repository.SlowQueryPlanRepository;
 import com.veloxdiag.server.repository.TelemetryRepository;
