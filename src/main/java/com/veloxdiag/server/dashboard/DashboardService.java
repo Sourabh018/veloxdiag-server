@@ -15,6 +15,7 @@ import com.veloxdiag.server.diagnosis.DiagnosisService;
 import com.veloxdiag.server.diagnosis.EndpointNormalizer;
 import com.veloxdiag.server.diagnosis.TelemetryWindowSettings;
 import com.veloxdiag.server.entity.Telemetry;
+import com.veloxdiag.server.diagnosis.EndpointNormalizer;
 import com.veloxdiag.server.repository.TelemetryRepository;
 import com.veloxdiag.server.repository.TelemetryRepository.SummaryProjection;
 
@@ -30,6 +31,7 @@ public class DashboardService {
     private static final int LOW_PENALTY = 2;
     private static final int STARTING_SCORE = 100;
     private static final int MAX_DEDUCTION_PER_ENDPOINT = 30;
+    private static final int LOOKBACK_DAYS_UNUSED_PLACEHOLDER = 0; // (ignore — not a real change, see below)
 
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
@@ -62,13 +64,29 @@ public class DashboardService {
         );
     }
 
-    // Reuses the same diagnosis engine that powers the Diagnosis page — the
-    // score is a direct function of the same findings a person would see if
-    // they clicked through, not a separately-computed metric that could drift
-    // out of sync with what the Diagnosis page actually reports.
+ // Averages per-endpoint deduction across ALL endpoints seen in the current
+    // window (including ones with zero findings), rather than summing capped
+    // deductions directly. Summing meant the score could still collapse to 0
+    // once you simply had enough endpoints each near the per-endpoint cap —
+    // having more endpoints isn't itself worse, so endpoint count shouldn't be
+    // able to zero the score by itself. Averaging means the floor is bounded
+    // by MAX_DEDUCTION_PER_ENDPOINT (e.g. 100 - 30 = 70 worst case), and the
+    // score only approaches that floor if MOST endpoints are near-maxed, not
+    // just because there happen to be several of them.
     private int computeHealthScore() {
-        List<DiagnosisFinding> findings = diagnosisService.runDiagnosis();
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
+        List<Telemetry> recent = telemetryRepository.findByTimestampAfter(cutoff);
 
+        long totalEndpointCount = recent.stream()
+                .map(t -> EndpointNormalizer.normalize(t.getEndpoint()))
+                .distinct()
+                .count();
+
+        if (totalEndpointCount == 0) {
+            return STARTING_SCORE;
+        }
+
+        List<DiagnosisFinding> findings = diagnosisService.runDiagnosis();
         Map<String, List<DiagnosisFinding>> byEndpoint = findings.stream()
                 .collect(Collectors.groupingBy(DiagnosisFinding::getEndpoint));
 
@@ -88,7 +106,12 @@ public class DashboardService {
             totalDeduction += Math.min(endpointDeduction, MAX_DEDUCTION_PER_ENDPOINT);
         }
 
-        return Math.max(0, STARTING_SCORE - totalDeduction);
+        // Endpoints with zero findings contribute 0 to totalDeduction but still
+        // count in totalEndpointCount — this is what pulls the average down
+        // when most of the app is actually healthy.
+        double averageDeduction = (double) totalDeduction / totalEndpointCount;
+
+        return Math.max(0, (int) Math.round(STARTING_SCORE - averageDeduction));
     }
 
     public List<Telemetry> getRecent(int limit) {
