@@ -132,8 +132,23 @@ public class RecommendationService {
             case "HIGH_ERROR_RATE":
             case "SERVER_ERROR":
             case "ROOT_CAUSE_CORRELATION":
-            default:
+                // Deliberately no recommendation: no honest generic fix exists for "error rate is
+                // high" or "a correlation was found" without knowing the actual exception/cause.
                 return null;
+
+            default:
+                // Anything else is a custom rule defined via RuleDefinitionEntity / RuleEngineService —
+                // an open-ended, user-configurable set we can't have a tailored template for in advance.
+                // Rather than silently dropping it (which would make custom rules invisible on this
+                // page forever), surface it plainly using the rule's own message, clearly labeled as
+                // untemplated so it reads as "here's the finding" rather than "here's a vetted fix."
+                return new Recommendation(
+                        endpoint, finding.getSeverity(), finding.getRuleType(),
+                        "Custom rule triggered — no specific fix template available yet",
+                        "This finding comes from a custom rule (\"" + finding.getRuleType() + "\") without a " +
+                        "built-in recommendation template. Underlying finding: " + finding.getMessage(),
+                        null, false, relatedFindings
+                );
         }
     }
 
