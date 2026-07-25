@@ -143,6 +143,7 @@ public class NarrativeService {
 
         ObjectNode generationConfig = root.putObject("generationConfig");
         generationConfig.put("maxOutputTokens", 2048);
+        generationConfig.putObject("thinkingConfig").put("thinkingBudget", 0);
 
         return objectMapper.writeValueAsString(root);
     }

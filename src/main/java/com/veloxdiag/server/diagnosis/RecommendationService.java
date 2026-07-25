@@ -323,6 +323,10 @@ public class RecommendationService {
         parts.addObject().put("text", prompt);
         ObjectNode generationConfig = root.putObject("generationConfig");
         generationConfig.put("maxOutputTokens", 900);
+        // Stops gemini-flash-latest's internal "thinking" tokens from eating into
+        // maxOutputTokens and truncating the actual suggestion mid-sentence —
+        // the real fix, instead of raising the token cap again each time this shows up.
+        generationConfig.putObject("thinkingConfig").put("thinkingBudget", 0);
         String requestBody = objectMapper.writeValueAsString(root);
 
         int attempts = Math.max(1, keyRotator.keyCount());
@@ -409,6 +413,7 @@ public class RecommendationService {
         parts.addObject().put("text", prompt);
         ObjectNode generationConfig = root.putObject("generationConfig");
         generationConfig.put("maxOutputTokens", 400);
+        generationConfig.putObject("thinkingConfig").put("thinkingBudget", 0);
         String requestBody = objectMapper.writeValueAsString(root);
 
         int attempts = Math.max(1, keyRotator.keyCount());
