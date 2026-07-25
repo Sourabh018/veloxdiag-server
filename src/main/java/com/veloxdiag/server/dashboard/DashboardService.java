@@ -25,10 +25,11 @@ public class DashboardService {
     // simple and explainable in one sentence (no hidden ML/black-box scoring):
     // a single HIGH finding meaningfully dents the score, a handful of LOWs
     // barely move it. Floored at 0 so a very broken app doesn't go negative.
-    private static final int HIGH_PENALTY = 15;
+	private static final int HIGH_PENALTY = 15;
     private static final int MEDIUM_PENALTY = 7;
     private static final int LOW_PENALTY = 2;
     private static final int STARTING_SCORE = 100;
+    private static final int MAX_DEDUCTION_PER_ENDPOINT = 30;
 
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
@@ -68,19 +69,26 @@ public class DashboardService {
     private int computeHealthScore() {
         List<DiagnosisFinding> findings = diagnosisService.runDiagnosis();
 
-        int deduction = 0;
-        for (DiagnosisFinding finding : findings) {
-            String severity = finding.getSeverity();
-            if ("HIGH".equals(severity)) {
-                deduction += HIGH_PENALTY;
-            } else if ("MEDIUM".equals(severity)) {
-                deduction += MEDIUM_PENALTY;
-            } else if ("LOW".equals(severity)) {
-                deduction += LOW_PENALTY;
+        Map<String, List<DiagnosisFinding>> byEndpoint = findings.stream()
+                .collect(Collectors.groupingBy(DiagnosisFinding::getEndpoint));
+
+        int totalDeduction = 0;
+        for (List<DiagnosisFinding> endpointFindings : byEndpoint.values()) {
+            int endpointDeduction = 0;
+            for (DiagnosisFinding finding : endpointFindings) {
+                String severity = finding.getSeverity();
+                if ("HIGH".equals(severity)) {
+                    endpointDeduction += HIGH_PENALTY;
+                } else if ("MEDIUM".equals(severity)) {
+                    endpointDeduction += MEDIUM_PENALTY;
+                } else if ("LOW".equals(severity)) {
+                    endpointDeduction += LOW_PENALTY;
+                }
             }
+            totalDeduction += Math.min(endpointDeduction, MAX_DEDUCTION_PER_ENDPOINT);
         }
 
-        return Math.max(0, STARTING_SCORE - deduction);
+        return Math.max(0, STARTING_SCORE - totalDeduction);
     }
 
     public List<Telemetry> getRecent(int limit) {
