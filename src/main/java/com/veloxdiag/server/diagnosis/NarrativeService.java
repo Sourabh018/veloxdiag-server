@@ -18,7 +18,7 @@ import java.util.stream.Collectors;
 @Service
 public class NarrativeService {
 
-    private static final String MODEL = "gemini-2.5-flash";
+    private static final String MODEL = "gemini-flash-latest";
     private static final String API_URL_TEMPLATE =
             "https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent?key=%s";
 
