@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.veloxdiag.server.entity.SlowQueryPlan;
 import com.veloxdiag.server.repository.SlowQueryPlanRepository;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
@@ -22,15 +21,19 @@ import java.util.stream.Collectors;
  *
  * Deterministic by default (template text per ruleType) — matches the project's
  * established pattern of the rule engine being the source of truth, not the LLM.
- * For MISSING_INDEX_CANDIDATE specifically, if we have a real captured
- * SlowQueryPlan (actual sqlText + EXPLAIN output) for the endpoint, an LLM call
- * turns that into a concrete example CREATE INDEX statement. If no plan is
- * captured yet, or the API key is missing, or the call fails, we fall back to
- * the generic template — never block the page on the AI call.
+ * Template text now weaves in each finding's real evidence numbers (sampleCount,
+ * averageQueryCount, maxQueryCount, averageDurationMs) so two endpoints hitting the
+ * same rule don't render identical copy-paste paragraphs.
+ *
+ * For MISSING_INDEX_CANDIDATE specifically, if we have a real captured SlowQueryPlan
+ * (actual sqlText + EXPLAIN output) for the endpoint, an LLM call turns that into a
+ * concrete example CREATE INDEX statement. If no plan is captured yet, the key pool
+ * is exhausted (429), or the call fails, we fall back to the generic template — never
+ * block the page on the AI call.
  *
  * HIGH_ERROR_RATE / SERVER_ERROR findings intentionally produce no recommendation:
- * there's no generic fix for "something threw an error" without knowing the
- * actual exception, so suggesting one would be a fabricated, unhelpful guess.
+ * there's no generic fix for "something threw an error" without knowing the actual
+ * exception, so suggesting one would be a fabricated, unhelpful guess.
  */
 @Service
 public class RecommendationService {
@@ -51,16 +54,16 @@ public class RecommendationService {
 
     private final DiagnosisService diagnosisService;
     private final SlowQueryPlanRepository slowQueryPlanRepository;
-    private final String apiKey;
+    private final GeminiKeyRotator keyRotator;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
     public RecommendationService(DiagnosisService diagnosisService,
                                   SlowQueryPlanRepository slowQueryPlanRepository,
-                                  @Value("${gemini.api.key:}") String apiKey) {
+                                  GeminiKeyRotator keyRotator) {
         this.diagnosisService = diagnosisService;
         this.slowQueryPlanRepository = slowQueryPlanRepository;
-        this.apiKey = apiKey;
+        this.keyRotator = keyRotator;
         this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
         this.objectMapper = new ObjectMapper();
     }
@@ -71,13 +74,9 @@ public class RecommendationService {
         Map<String, List<DiagnosisFinding>> byEndpoint = allFindings.stream()
                 .collect(Collectors.groupingBy(DiagnosisFinding::getEndpoint));
 
-        // Endpoint -> its recommendations. LinkedHashMap so insertion order (which we
-        // control below) survives into the JSON response — the frontend renders
-        // sections in whatever key order the object has.
         Map<String, List<Recommendation>> byEndpointRecs = new LinkedHashMap<>();
-
-        // First pass: build every recommendation, grouped, unsorted.
         Map<String, List<Recommendation>> raw = new LinkedHashMap<>();
+
         for (Map.Entry<String, List<DiagnosisFinding>> entry : byEndpoint.entrySet()) {
             String endpoint = entry.getKey();
             List<String> ruleTypes = entry.getValue().stream()
@@ -96,8 +95,6 @@ public class RecommendationService {
             }
         }
 
-        // Order endpoints worst-severity-first (by that endpoint's single worst recommendation),
-        // sort each endpoint's own recommendation list worst-first too.
         raw.entrySet().stream()
                 .sorted((a, b) -> worstSeverity(b.getValue()) - worstSeverity(a.getValue()))
                 .forEach(e -> {
@@ -120,50 +117,20 @@ public class RecommendationService {
                 return buildIndexRecommendation(endpoint, finding, relatedFindings);
 
             case "POSSIBLE_N_PLUS_ONE":
-                return new Recommendation(
-                        endpoint, finding.getSeverity(), finding.getRuleType(),
-                        "Batch or eager-fetch the related entity instead of querying per row",
-                        "This endpoint issues a growing number of near-identical queries per request, " +
-                        "the classic N+1 shape. In JPA/Hibernate, fix it with a JOIN FETCH in the repository " +
-                        "query, an @EntityGraph on the method, or a batch-fetch-size hint — whichever fits " +
-                        "the actual relationship being loaded. VeloxDiag doesn't know the exact entity, so " +
-                        "verify against the repository method backing this endpoint before applying.",
-                        finding.getEvidence(),
-                        "// Example — replace the per-row lookup with a single fetch join:\n" +
-                        "@Query(\"SELECT e FROM Entity e JOIN FETCH e.relatedEntity WHERE ...\")",
-                        false, relatedFindings
-                );
+                return buildNPlusOneRecommendation(endpoint, finding, relatedFindings);
 
             case "SLOW_REQUEST":
-                // Only recommend for standalone slow-request findings — if N+1 or missing-index
-                // findings are also present for this endpoint, those carry the concrete fix instead.
                 if (relatedFindings.contains("POSSIBLE_N_PLUS_ONE") || relatedFindings.contains("MISSING_INDEX_CANDIDATE")) {
                     return null;
                 }
-                return new Recommendation(
-                        endpoint, finding.getSeverity(), finding.getRuleType(),
-                        "Profile this endpoint — no query-level cause identified yet",
-                        "This endpoint is slow but doesn't show a query-count spike or a consistently-slow " +
-                        "index pattern. The cause is likely outside the database layer: an external API call, " +
-                        "serialization overhead, or synchronous work that could be made async. Check the " +
-                        "Query Analyzer and Slow Queries pages for this endpoint for more evidence before guessing further.",
-                        finding.getEvidence(),
-                        null, false, relatedFindings
-                );
+                return buildSlowRequestRecommendation(endpoint, finding, relatedFindings);
 
             case "HIGH_ERROR_RATE":
             case "SERVER_ERROR":
             case "ROOT_CAUSE_CORRELATION":
-                // Deliberately no recommendation: no honest generic fix exists for "error rate is
-                // high" or "a correlation was found" without knowing the actual exception/cause.
                 return null;
 
             default:
-                // Anything else is a custom rule defined via RuleDefinitionEntity / RuleEngineService —
-                // an open-ended, user-configurable set we can't have a tailored template for in advance.
-                // Rather than silently dropping it (which would make custom rules invisible on this
-                // page forever), surface it plainly using the rule's own message, clearly labeled as
-                // untemplated so it reads as "here's the finding" rather than "here's a vetted fix."
                 return new Recommendation(
                         endpoint, finding.getSeverity(), finding.getRuleType(),
                         "Custom rule triggered — no specific fix template available yet",
@@ -173,6 +140,83 @@ public class RecommendationService {
                         null, false, relatedFindings
                 );
         }
+    }
+
+    private Recommendation buildNPlusOneRecommendation(String endpoint, DiagnosisFinding finding, List<String> relatedFindings) {
+        Map<String, Object> ev = asMap(finding.getEvidence());
+        String sampleCount = evString(ev, "sampleCount");
+        String avgQueryCount = evString(ev, "averageQueryCount");
+        String maxQueryCount = evString(ev, "maxQueryCount");
+
+        String detail;
+        if (sampleCount != null && avgQueryCount != null && maxQueryCount != null) {
+            detail = String.format(
+                    "Across %s sampled requests, this endpoint averaged %s SQL queries and spiked to a maximum " +
+                    "of %s in at least one call — the classic N+1 shape. In JPA/Hibernate, fix it with a " +
+                    "JOIN FETCH in the repository query, an @EntityGraph on the method, or a batch-fetch-size " +
+                    "hint — whichever fits the actual relationship being loaded. VeloxDiag doesn't know the " +
+                    "exact entity, so verify against the repository method backing this endpoint before applying.",
+                    sampleCount, avgQueryCount, maxQueryCount);
+        } else {
+            detail = "This endpoint issues a growing number of near-identical queries per request, the " +
+                    "classic N+1 shape. In JPA/Hibernate, fix it with a JOIN FETCH in the repository query, " +
+                    "an @EntityGraph on the method, or a batch-fetch-size hint — whichever fits the actual " +
+                    "relationship being loaded. VeloxDiag doesn't know the exact entity, so verify against " +
+                    "the repository method backing this endpoint before applying.";
+        }
+
+        return new Recommendation(
+                endpoint, finding.getSeverity(), finding.getRuleType(),
+                "Batch or eager-fetch the related entity instead of querying per row",
+                detail,
+                finding.getEvidence(),
+                "// Example — replace the per-row lookup with a single fetch join:\n" +
+                "@Query(\"SELECT e FROM Entity e JOIN FETCH e.relatedEntity WHERE ...\")",
+                false, relatedFindings
+        );
+    }
+
+    private Recommendation buildSlowRequestRecommendation(String endpoint, DiagnosisFinding finding, List<String> relatedFindings) {
+        Map<String, Object> ev = asMap(finding.getEvidence());
+        String avgDuration = evString(ev, "averageDurationMs");
+        String sampleCount = evString(ev, "sampleCount");
+
+        String detail;
+        if (avgDuration != null) {
+            detail = String.format(
+                    "This endpoint is averaging %sms per request%s, but shows no query-count spike or " +
+                    "consistently-slow index pattern. The cause is likely outside the database layer: an " +
+                    "external API call, serialization overhead, or synchronous work that could be made " +
+                    "async. Check the Query Analyzer and Slow Queries pages for this endpoint for more " +
+                    "evidence before guessing further.",
+                    avgDuration, sampleCount != null ? " across " + sampleCount + " sampled requests" : "");
+        } else {
+            detail = "This endpoint is slow but doesn't show a query-count spike or a consistently-slow " +
+                    "index pattern. The cause is likely outside the database layer: an external API call, " +
+                    "serialization overhead, or synchronous work that could be made async. Check the " +
+                    "Query Analyzer and Slow Queries pages for this endpoint for more evidence before guessing further.";
+        }
+
+        return new Recommendation(
+                endpoint, finding.getSeverity(), finding.getRuleType(),
+                "Profile this endpoint — no query-level cause identified yet",
+                detail, finding.getEvidence(),
+                null, false, relatedFindings
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> asMap(Object evidence) {
+        if (evidence instanceof Map) {
+            return (Map<String, Object>) evidence;
+        }
+        return null;
+    }
+
+    private String evString(Map<String, Object> ev, String key) {
+        if (ev == null) return null;
+        Object v = ev.get(key);
+        return v == null ? null : String.valueOf(v);
     }
 
     private Recommendation buildIndexRecommendation(String endpoint, DiagnosisFinding finding, List<String> relatedFindings) {
@@ -187,7 +231,7 @@ public class RecommendationService {
         List<SlowQueryPlan> plans = slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
         SlowQueryPlan seqScanPlan = plans.stream().filter(SlowQueryPlan::isContainsSeqScan).findFirst().orElse(null);
 
-        if (seqScanPlan == null || apiKey == null || apiKey.isBlank()) {
+        if (seqScanPlan == null || !keyRotator.hasKeys()) {
             return new Recommendation(endpoint, finding.getSeverity(), finding.getRuleType(),
                     "Add a database index — pattern suggests a missing index",
                     genericDetail, finding.getEvidence(), genericCode, false, relatedFindings);
@@ -213,6 +257,8 @@ public class RecommendationService {
                 genericDetail, finding.getEvidence(), genericCode, false, relatedFindings);
     }
 
+    // Tries current key; on 429 rotates and retries once per remaining key.
+    // Returns null (never throws for 429) so caller falls back to template cleanly.
     private String callGeminiForIndex(SlowQueryPlan plan) throws Exception {
         String prompt = INDEX_SYSTEM_PROMPT + "\n\nSQL:\n" + plan.getSqlText() +
                 "\n\nEXPLAIN PLAN:\n" + plan.getExplainPlan();
@@ -224,28 +270,37 @@ public class RecommendationService {
         parts.addObject().put("text", prompt);
         ObjectNode generationConfig = root.putObject("generationConfig");
         generationConfig.put("maxOutputTokens", 400);
+        String requestBody = objectMapper.writeValueAsString(root);
 
-        String url = String.format(API_URL_TEMPLATE, apiKey);
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .timeout(Duration.ofSeconds(30))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(root)))
-                .build();
+        int attempts = Math.max(1, keyRotator.keyCount());
+        for (int i = 0; i < attempts; i++) {
+            String url = String.format(API_URL_TEMPLATE, keyRotator.current());
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .timeout(Duration.ofSeconds(30))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .build();
 
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) {
-            return null;
-        }
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
-        JsonNode responseRoot = objectMapper.readTree(response.body());
-        JsonNode candidates = responseRoot.path("candidates");
-        if (candidates.isArray() && candidates.size() > 0) {
-            JsonNode textParts = candidates.get(0).path("content").path("parts");
-            if (textParts.isArray() && textParts.size() > 0) {
-                String text = textParts.get(0).path("text").asText();
-                return text.isBlank() ? null : text.trim();
+            if (response.statusCode() == 200) {
+                JsonNode responseRoot = objectMapper.readTree(response.body());
+                JsonNode candidates = responseRoot.path("candidates");
+                if (candidates.isArray() && candidates.size() > 0) {
+                    JsonNode textParts = candidates.get(0).path("content").path("parts");
+                    if (textParts.isArray() && textParts.size() > 0) {
+                        String text = textParts.get(0).path("text").asText();
+                        return text.isBlank() ? null : text.trim();
+                    }
+                }
+                return null;
             }
+
+            if (response.statusCode() == 429 && keyRotator.rotate()) {
+                continue; // try next key
+            }
+            return null; // non-429 failure or no more keys — fall back to template
         }
         return null;
     }

@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
@@ -35,12 +34,12 @@ public class NarrativeService {
             "'the primary driver' or 'is caused by' unless the finding itself is HIGH severity or stated " +
             "as confirmed. Never let your narrative sound more certain than the underlying evidence.";
 
-    private final String apiKey;
+    private final GeminiKeyRotator keyRotator;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
-    public NarrativeService(@Value("${gemini.api.key:}") String apiKey) {
-        this.apiKey = apiKey;
+    public NarrativeService(GeminiKeyRotator keyRotator) {
+        this.keyRotator = keyRotator;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
@@ -58,40 +57,62 @@ public class NarrativeService {
                     ruleTypes);
         }
 
-        if (apiKey == null || apiKey.isBlank()) {
+        if (!keyRotator.hasKeys()) {
             return new EndpointNarrative(endpoint,
                     "Narrative generation isn't configured (missing GEMINI_API_KEY).", ruleTypes);
         }
 
+        String fullPrompt = SYSTEM_PROMPT + "\n\n" + buildFindingsBlock(endpoint, findings);
+        String requestBody;
         try {
-            String fullPrompt = SYSTEM_PROMPT + "\n\n" + buildFindingsBlock(endpoint, findings);
-            String requestBody = buildRequestBody(fullPrompt);
-            String url = String.format(API_URL_TEMPLATE, apiKey);
-
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(30))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() != 200) {
-                String rawBody = response.body();
-                String truncated = rawBody.length() > 300 ? rawBody.substring(0, 300) : rawBody;
-                return new EndpointNarrative(endpoint,
-                        "Narrative generation failed (status " + response.statusCode() + "): " + truncated,
-                        ruleTypes);
-            }
-
-            String text = extractText(response.body());
-            return new EndpointNarrative(endpoint, text, ruleTypes);
-
+            requestBody = buildRequestBody(fullPrompt);
         } catch (Exception e) {
             return new EndpointNarrative(endpoint,
                     "Narrative generation failed: " + e.getClass().getSimpleName(), ruleTypes);
         }
+
+        // Try once per available key. Stops at first non-429 outcome (success or a
+        // real error), only advances on 429 so quota exhaustion doesn't burn through
+        // keys pointlessly for unrelated failures.
+        int attempts = Math.max(1, keyRotator.keyCount());
+        String lastFailureBody = null;
+        int lastStatus = -1;
+
+        for (int i = 0; i < attempts; i++) {
+            String url = String.format(API_URL_TEMPLATE, keyRotator.current());
+            try {
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(url))
+                        .timeout(Duration.ofSeconds(30))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                        .build();
+
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+                if (response.statusCode() == 200) {
+                    String text = extractText(response.body());
+                    return new EndpointNarrative(endpoint, text, ruleTypes);
+                }
+
+                lastStatus = response.statusCode();
+                lastFailureBody = response.body();
+
+                if (response.statusCode() == 429 && keyRotator.rotate()) {
+                    continue; // try next key
+                }
+                break; // non-429 failure, or no more keys to rotate to
+            } catch (Exception e) {
+                return new EndpointNarrative(endpoint,
+                        "Narrative generation failed: " + e.getClass().getSimpleName(), ruleTypes);
+            }
+        }
+
+        String truncated = lastFailureBody != null && lastFailureBody.length() > 300
+                ? lastFailureBody.substring(0, 300) : lastFailureBody;
+        return new EndpointNarrative(endpoint,
+                "Narrative generation failed (status " + lastStatus + "): " + truncated,
+                ruleTypes);
     }
 
     private String buildFindingsBlock(String endpoint, List<DiagnosisFinding> findings) {
@@ -125,6 +146,7 @@ public class NarrativeService {
 
         return objectMapper.writeValueAsString(root);
     }
+
     private String extractText(String responseBody) throws Exception {
         JsonNode root = objectMapper.readTree(responseBody);
         JsonNode candidates = root.path("candidates");
