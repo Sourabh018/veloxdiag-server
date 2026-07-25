@@ -356,6 +356,7 @@ public class RecommendationService {
                 return null;
             }
 
+            System.out.println("[VeloxDiag] Gemini suggestion call failed status=" + response.statusCode() + " body=" + response.body().substring(0, Math.min(200, response.body().length())));
             if (response.statusCode() == 429 && keyRotator.rotate()) {
                 continue;
             }
