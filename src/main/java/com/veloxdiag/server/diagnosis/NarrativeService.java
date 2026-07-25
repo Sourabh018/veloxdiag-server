@@ -28,7 +28,12 @@ public class NarrativeService {
             "2-4 sentence explanation of the likely root cause. If multiple findings are present, state " +
             "which is the primary driver and which are secondary, using the confidence/ratio data provided " +
             "where available. Do not invent numbers, percentages, or facts that are not present in the " +
-            "input. If the evidence is inconclusive, say so plainly rather than guessing.";
+            "input. If the evidence is inconclusive, say so plainly rather than guessing. " +
+            "Match your confidence language to each finding's stated severity and wording: a LOW-severity " +
+            "or 'possible'/'suspected' finding must be described with equally hedged language (e.g. " +
+            "'may indicate', 'a possible contributor') — do not upgrade it to definitive phrasing like " +
+            "'the primary driver' or 'is caused by' unless the finding itself is HIGH severity or stated " +
+            "as confirmed. Never let your narrative sound more certain than the underlying evidence.";
 
     private final String apiKey;
     private final HttpClient httpClient;
