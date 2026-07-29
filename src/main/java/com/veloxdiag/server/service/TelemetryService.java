@@ -21,4 +21,13 @@ public class TelemetryService {
     public List<Telemetry> getAllTelemetry() {
         return repository.findAll();
     }
+
+    public List<Telemetry> getAllTelemetry(String applicationName) {
+        if (applicationName == null || applicationName.isBlank()) {
+            return getAllTelemetry();
+        }
+        return repository.findAll().stream()
+                .filter(t -> applicationName.equals(t.getApplicationName()))
+                .toList();
+    }
 }

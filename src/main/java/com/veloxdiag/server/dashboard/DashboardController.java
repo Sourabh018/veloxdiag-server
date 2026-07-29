@@ -18,27 +18,38 @@ public class DashboardController {
     }
 
     @GetMapping("/api/dashboard/summary")
-    public DashboardSummary getSummary() {
-        return dashboardService.getSummary();
+    public DashboardSummary getSummary(@RequestParam(required = false) String applicationName) {
+        return dashboardService.getSummary(applicationName);
     }
 
     @GetMapping("/api/dashboard/recent")
-    public List<Telemetry> getRecent(@RequestParam(defaultValue = "20") int limit) {
-        return dashboardService.getRecent(limit);
+    public List<Telemetry> getRecent(@RequestParam(defaultValue = "20") int limit,
+                                      @RequestParam(required = false) String applicationName) {
+        return dashboardService.getRecent(limit, applicationName);
     }
 
     @GetMapping("/api/dashboard/errors")
-    public List<Telemetry> getErrors(@RequestParam(defaultValue = "20") int limit) {
-        return dashboardService.getErrors(limit);
+    public List<Telemetry> getErrors(@RequestParam(defaultValue = "20") int limit,
+                                      @RequestParam(required = false) String applicationName) {
+        return dashboardService.getErrors(limit, applicationName);
     }
 
     @GetMapping("/api/dashboard/slow-endpoints")
-    public List<SlowEndpointDTO> getSlowEndpoints(@RequestParam(defaultValue = "10") int limit) {
-        return dashboardService.getSlowEndpoints(limit);
+    public List<SlowEndpointDTO> getSlowEndpoints(@RequestParam(defaultValue = "10") int limit,
+                                                   @RequestParam(required = false) String applicationName) {
+        return dashboardService.getSlowEndpoints(limit, applicationName);
     }
 
     @GetMapping("/api/dashboard/trends")
-    public List<TrendPointDTO> getTrends(@RequestParam(defaultValue = "24") int hours) {
-        return dashboardService.getTrends(hours);
+    public List<TrendPointDTO> getTrends(@RequestParam(defaultValue = "24") int hours,
+                                          @RequestParam(required = false) String applicationName) {
+        return dashboardService.getTrends(hours, applicationName);
+    }
+
+    // Distinct application names seen in telemetry — populates the app-selector
+    // dropdown. Frontend adds "All Apps" itself as the default option.
+    @GetMapping("/api/dashboard/applications")
+    public List<String> getApplications() {
+        return dashboardService.getApplications();
     }
 }

@@ -43,13 +43,23 @@ public class DashboardService {
     }
 
     public DashboardSummary getSummary() {
-        SummaryProjection stats = telemetryRepository.getSummaryStats();
+        return buildSummary(telemetryRepository.getSummaryStats(), computeHealthScore(null));
+    }
 
+    // App-selector-scoped version. Blank/null applicationName falls back to the
+    // combined "All Apps" view, same as getSummary() above.
+    public DashboardSummary getSummary(String applicationName) {
+        if (applicationName == null || applicationName.isBlank()) {
+            return getSummary();
+        }
+        return buildSummary(telemetryRepository.getSummaryStatsByApplication(applicationName), computeHealthScore(applicationName));
+    }
+
+    private DashboardSummary buildSummary(TelemetryRepository.SummaryProjection stats, int healthScore) {
         long totalRequests = stats.getTotalRequests() == null ? 0L : stats.getTotalRequests();
         double averageResponseTime = stats.getAverageResponseTime() == null ? 0.0 : stats.getAverageResponseTime();
         long errorRequests = stats.getErrorRequests() == null ? 0L : stats.getErrorRequests();
         long connectedApplications = stats.getConnectedApplications() == null ? 0L : stats.getConnectedApplications();
-        int healthScore = computeHealthScore();
 
         return new DashboardSummary(
                 totalRequests,
@@ -58,6 +68,12 @@ public class DashboardService {
                 connectedApplications,
                 healthScore
         );
+    }
+
+    // Distinct application names seen in telemetry — populates the app-selector
+    // dropdown ("All Apps" is added client-side, not stored here).
+    public List<String> getApplications() {
+        return telemetryRepository.findDistinctApplicationNames();
     }
 
     // Averages per-endpoint deduction across ALL endpoints seen in the current
@@ -69,9 +85,11 @@ public class DashboardService {
     // by MAX_DEDUCTION_PER_ENDPOINT (e.g. 100 - 30 = 70 worst case), and the
     // score only approaches that floor if MOST endpoints are near-maxed, not
     // just because there happen to be several of them.
-    private int computeHealthScore() {
+    private int computeHealthScore(String applicationName) {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
-        List<Telemetry> recent = telemetryRepository.findByTimestampAfter(cutoff);
+        List<Telemetry> recent = (applicationName == null || applicationName.isBlank())
+                ? telemetryRepository.findByTimestampAfter(cutoff)
+                : telemetryRepository.findByApplicationNameAndTimestampAfter(applicationName, cutoff);
 
         long totalEndpointCount = recent.stream()
                 .map(t -> EndpointNormalizer.normalize(t.getEndpoint()))
@@ -82,7 +100,7 @@ public class DashboardService {
             return STARTING_SCORE;
         }
 
-        List<DiagnosisFinding> findings = diagnosisService.runDiagnosis();
+        List<DiagnosisFinding> findings = diagnosisService.runDiagnosis(applicationName);
         Map<String, List<DiagnosisFinding>> byEndpoint = findings.stream()
                 .collect(Collectors.groupingBy(DiagnosisFinding::getEndpoint));
 
@@ -112,14 +130,36 @@ public class DashboardService {
         return telemetryRepository.findAllByOrderByTimestampDesc(pageable);
     }
 
+    public List<Telemetry> getRecent(int limit, String applicationName) {
+        if (applicationName == null || applicationName.isBlank()) {
+            return getRecent(limit);
+        }
+        Pageable pageable = PageRequest.of(0, limit);
+        return telemetryRepository.findByApplicationNameOrderByTimestampDesc(applicationName, pageable);
+    }
+
     public List<Telemetry> getErrors(int limit) {
         Pageable pageable = PageRequest.of(0, limit);
         return telemetryRepository.findByStatusGreaterThanEqualOrderByTimestampDesc(400, pageable);
     }
 
+    public List<Telemetry> getErrors(int limit, String applicationName) {
+        if (applicationName == null || applicationName.isBlank()) {
+            return getErrors(limit);
+        }
+        Pageable pageable = PageRequest.of(0, limit);
+        return telemetryRepository.findByApplicationNameAndStatusGreaterThanEqualOrderByTimestampDesc(applicationName, 400, pageable);
+    }
+
     public List<SlowEndpointDTO> getSlowEndpoints(int limit) {
+        return getSlowEndpoints(limit, null);
+    }
+
+    public List<SlowEndpointDTO> getSlowEndpoints(int limit, String applicationName) {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
-        List<Telemetry> recent = telemetryRepository.findByTimestampAfter(cutoff);
+        List<Telemetry> recent = (applicationName == null || applicationName.isBlank())
+                ? telemetryRepository.findByTimestampAfter(cutoff)
+                : telemetryRepository.findByApplicationNameAndTimestampAfter(applicationName, cutoff);
         double threshold = diagnosisService.getSlowRequestThresholdMs();
 
         Map<String, List<Telemetry>> byEndpoint = recent.stream()
@@ -142,7 +182,12 @@ public class DashboardService {
     }
 
     public List<TrendPointDTO> getTrends(int hours) {
-        List<Object[]> rows = telemetryRepository.findHourlyTrends(hours);
+        return getTrends(hours, null);
+    }
+
+    public List<TrendPointDTO> getTrends(int hours, String applicationName) {
+        String appFilter = (applicationName == null || applicationName.isBlank()) ? null : applicationName;
+        List<Object[]> rows = telemetryRepository.findHourlyTrends(hours, appFilter);
         return rows.stream()
                 .map(r -> new TrendPointDTO(
                         (String) r[0],

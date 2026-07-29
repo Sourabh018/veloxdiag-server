@@ -56,8 +56,18 @@ public class DiagnosisService {
     public void setSeqScanRowThreshold(long value) { this.seqScanRowThreshold = value; }
 
     public List<DiagnosisFinding> runDiagnosis() {
+        return runDiagnosis(null);
+    }
+
+    // App-selector-scoped version. Blank/null applicationName means "All Apps" —
+    // same combined behavior as runDiagnosis() above. Filtering happens before
+    // grouping by endpoint so cross-app endpoint-name collisions (unlikely, but
+    // possible) can't mix findings from two different applications together.
+    public List<DiagnosisFinding> runDiagnosis(String applicationName) {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
-        List<Telemetry> allTelemetry = telemetryRepository.findByTimestampAfter(cutoff);
+        List<Telemetry> allTelemetry = (applicationName == null || applicationName.isBlank())
+                ? telemetryRepository.findByTimestampAfter(cutoff)
+                : telemetryRepository.findByApplicationNameAndTimestampAfter(applicationName, cutoff);
         List<DiagnosisFinding> findings = new ArrayList<>();
 
         Map<String, List<Telemetry>> byEndpoint = allTelemetry.stream()

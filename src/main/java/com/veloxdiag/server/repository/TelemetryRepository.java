@@ -32,23 +32,48 @@ public interface TelemetryRepository extends JpaRepository<Telemetry, Long> {
            "FROM Telemetry t")
     SummaryProjection getSummaryStats();
 
+    // Same as getSummaryStats() but scoped to one application — used when the
+    // dashboard's app selector has a specific app chosen instead of "All Apps".
+    @Query("SELECT COUNT(t) as totalRequests, " +
+           "AVG(t.durationMs) as averageResponseTime, " +
+           "SUM(CASE WHEN t.status >= 400 THEN 1 ELSE 0 END) as errorRequests, " +
+           "COUNT(DISTINCT t.applicationName) as connectedApplications " +
+           "FROM Telemetry t WHERE t.applicationName = :applicationName")
+    SummaryProjection getSummaryStatsByApplication(String applicationName);
+
+    // Distinct app names seen in telemetry — populates the app-selector dropdown.
+    @Query("SELECT DISTINCT t.applicationName FROM Telemetry t ORDER BY t.applicationName")
+    List<String> findDistinctApplicationNames();
+
     // recent requests, most recent first, capped by Pageable limit
     List<Telemetry> findAllByOrderByTimestampDesc(Pageable pageable);
+
+    // same as above, scoped to one application
+    List<Telemetry> findByApplicationNameOrderByTimestampDesc(String applicationName, Pageable pageable);
 
     // error requests, most recent first, capped by Pageable limit
     List<Telemetry> findByStatusGreaterThanEqualOrderByTimestampDesc(Integer status, Pageable pageable);
 
-    // hourly trend buckets, last N hours (native query, MySQL syntax)
+    // same as above, scoped to one application
+    List<Telemetry> findByApplicationNameAndStatusGreaterThanEqualOrderByTimestampDesc(String applicationName, Integer status, Pageable pageable);
+
+    // hourly trend buckets, last N hours (native query, MySQL syntax). applicationName
+    // is nullable — passing null matches all applications (the "All Apps" view).
     @Query(value = "SELECT DATE_FORMAT(timestamp, '%Y-%m-%d %H:00:00') as bucket, " +
             "COUNT(*) as requestCount, AVG(duration_ms) as avgDuration, " +
             "SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) as errorCount " +
             "FROM telemetry " +
             "WHERE timestamp >= (NOW() - INTERVAL :hours HOUR) " +
+            "AND (:applicationName IS NULL OR application_name = :applicationName) " +
             "GROUP BY bucket ORDER BY bucket ASC", nativeQuery = true)
-    List<Object[]> findHourlyTrends(int hours);
+    List<Object[]> findHourlyTrends(int hours, String applicationName);
 
     // used by Diagnosis, Query Analyzer, and Index Advisor to only scan recent telemetry
     List<Telemetry> findByTimestampAfter(LocalDateTime timestamp);
+
+    // same as above, scoped to one application — used when the app selector filters
+    // Diagnosis/Query Analyzer/Index Advisor to a single app instead of "All Apps"
+    List<Telemetry> findByApplicationNameAndTimestampAfter(String applicationName, LocalDateTime timestamp);
 
     public interface SummaryProjection {
         Long getTotalRequests();

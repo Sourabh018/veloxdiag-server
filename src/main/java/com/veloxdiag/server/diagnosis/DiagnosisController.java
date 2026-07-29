@@ -2,6 +2,7 @@ package com.veloxdiag.server.diagnosis;
 
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -17,7 +18,7 @@ public class DiagnosisController {
     }
 
     @GetMapping
-    public List<DiagnosisFinding> getDiagnosis() {
-        return diagnosisService.runDiagnosis();
+    public List<DiagnosisFinding> getDiagnosis(@RequestParam(required = false) String applicationName) {
+        return diagnosisService.runDiagnosis(applicationName);
     }
 }
