@@ -22,8 +22,8 @@ public class RecommendationController {
     }
 
     @GetMapping
-    public Map<String, List<Recommendation>> getRecommendations() {
-        return recommendationService.getRecommendations();
+    public Map<String, List<Recommendation>> getRecommendations(@RequestParam(required = false) String applicationName) {
+        return recommendationService.getRecommendations(applicationName);
     }
 
     // On-demand tailored suggestion, same pattern as /api/diagnosis/narrative:

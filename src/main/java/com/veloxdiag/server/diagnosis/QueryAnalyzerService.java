@@ -27,8 +27,16 @@ public class QueryAnalyzerService {
     }
 
     public List<EndpointTrend> analyzeTrends() {
+        return analyzeTrends(null);
+    }
+
+    // App-selector-scoped version. Blank/null applicationName means "All Apps" —
+    // same combined behavior as analyzeTrends() above.
+    public List<EndpointTrend> analyzeTrends(String applicationName) {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
-        List<Telemetry> all = telemetryRepository.findByTimestampAfter(cutoff);
+        List<Telemetry> all = (applicationName == null || applicationName.isBlank())
+                ? telemetryRepository.findByTimestampAfter(cutoff)
+                : telemetryRepository.findByApplicationNameAndTimestampAfter(applicationName, cutoff);
 
         Map<String, List<Telemetry>> byEndpoint = all.stream()
                 .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));

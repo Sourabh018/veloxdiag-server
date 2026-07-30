@@ -36,8 +36,16 @@ public class IndexAdvisorService {
     public void setLowVarianceThreshold(double lowVarianceThreshold) { this.lowVarianceThreshold = lowVarianceThreshold; }
 
     public List<IndexAdvisorFinding> analyzeCandidates() {
+        return analyzeCandidates(null);
+    }
+
+    // App-selector-scoped version. Blank/null applicationName means "All Apps" —
+    // same combined behavior as analyzeCandidates() above.
+    public List<IndexAdvisorFinding> analyzeCandidates(String applicationName) {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
-        List<Telemetry> all = telemetryRepository.findByTimestampAfter(cutoff);
+        List<Telemetry> all = (applicationName == null || applicationName.isBlank())
+                ? telemetryRepository.findByTimestampAfter(cutoff)
+                : telemetryRepository.findByApplicationNameAndTimestampAfter(applicationName, cutoff);
 
         Map<String, List<Telemetry>> byEndpoint = all.stream()
                 .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));

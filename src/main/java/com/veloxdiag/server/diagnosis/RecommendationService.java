@@ -69,7 +69,13 @@ public class RecommendationService {
     }
 
     public Map<String, List<Recommendation>> getRecommendations() {
-        List<DiagnosisFinding> allFindings = diagnosisService.runDiagnosis();
+        return getRecommendations(null);
+    }
+
+    // App-selector-scoped version. Blank/null applicationName means "All Apps" —
+    // same combined behavior as getRecommendations() above.
+    public Map<String, List<Recommendation>> getRecommendations(String applicationName) {
+        List<DiagnosisFinding> allFindings = diagnosisService.runDiagnosis(applicationName);
 
         Map<String, List<DiagnosisFinding>> byEndpoint = allFindings.stream()
                 .collect(Collectors.groupingBy(DiagnosisFinding::getEndpoint));
