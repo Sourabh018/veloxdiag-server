@@ -63,6 +63,13 @@ public class DiagnosisService {
     // same combined behavior as runDiagnosis() above. Filtering happens before
     // grouping by endpoint so cross-app endpoint-name collisions (unlikely, but
     // possible) can't mix findings from two different applications together.
+    //
+    // PERFORMANCE NOTE (fixed — was an N+1 against our own tables): this method
+    // loops over every distinct endpoint. Previously, computeEndpointFindings
+    // re-fetched the full rule_definitions table AND re-queried slow_query_plans
+    // once PER endpoint — with ~15+ endpoints across apps, every dashboard poll
+    // fired 30+ near-identical queries. Both are now fetched ONCE here and
+    // passed into the loop, then filtered/grouped in memory per endpoint.
     public List<DiagnosisFinding> runDiagnosis(String applicationName) {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
         List<Telemetry> allTelemetry = (applicationName == null || applicationName.isBlank())
@@ -73,13 +80,47 @@ public class DiagnosisService {
         Map<String, List<Telemetry>> byEndpoint = allTelemetry.stream()
                 .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
 
+        // Fetched once for the whole run, not once per endpoint.
+        List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules =
+                ruleEngineService.loadEnabledRules();
+
+        Map<String, List<SlowQueryPlan>> plansByEndpoint = slowQueryPlanRepository
+                .findByContainsSeqScanTrueAndTimestampAfter(cutoff).stream()
+                .collect(Collectors.groupingBy(p -> EndpointNormalizer.normalize(p.getEndpoint())));
+
         for (Map.Entry<String, List<Telemetry>> entry : byEndpoint.entrySet()) {
-            findings.addAll(computeEndpointFindings(entry.getKey(), entry.getValue(), cutoff));
+            String endpoint = entry.getKey();
+            List<SlowQueryPlan> plansForEndpoint = plansByEndpoint.getOrDefault(endpoint, List.of());
+            findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, rules));
         }
 
         return findings;
     }
 
+    // Batched path — used by runDiagnosis, takes pre-fetched rules and
+    // pre-fetched (already endpoint-filtered) seq-scan plans so no query
+    // happens inside this method at all.
+    private List<DiagnosisFinding> computeEndpointFindings(
+            String endpoint, List<Telemetry> records, List<SlowQueryPlan> seqScanPlans,
+            List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules) {
+        List<DiagnosisFinding> endpointFindings = new ArrayList<>();
+        endpointFindings.addAll(checkSlowRequest(endpoint, records));
+        endpointFindings.addAll(checkHighErrorRate(endpoint, records));
+        endpointFindings.addAll(checkServerErrors(endpoint, records));
+        endpointFindings.addAll(checkPossibleNPlusOne(endpoint, records));
+        endpointFindings.addAll(checkMissingIndexCandidateFromPlans(endpoint, seqScanPlans));
+
+        List<DiagnosisFinding> combined = new ArrayList<>(endpointFindings);
+        combined.addAll(correlateFindings(endpoint, records, endpointFindings));
+        combined.addAll(ruleEngineService.evaluate(endpoint, records, rules));
+
+        return combined;
+    }
+
+    // Unbatched path — used only by getFindingsForEndpoint, which evaluates a
+    // single endpoint on demand (e.g. the "Explain this" narrative fetch).
+    // No batching benefit for exactly one endpoint, so this fetches inline as
+    // before; kept as a separate method rather than overloading with nulls.
     private List<DiagnosisFinding> computeEndpointFindings(String endpoint, List<Telemetry> records,
                                                              LocalDateTime cutoff) {
         List<DiagnosisFinding> endpointFindings = new ArrayList<>();
@@ -305,7 +346,14 @@ public class DiagnosisService {
     private List<DiagnosisFinding> checkMissingIndexCandidate(String endpoint, LocalDateTime cutoff) {
         List<SlowQueryPlan> plans = slowQueryPlanRepository
                 .findByEndpointAndContainsSeqScanTrueAndTimestampAfter(endpoint, cutoff);
+        return checkMissingIndexCandidateFromPlans(endpoint, plans);
+    }
 
+    // Batched variant — takes plans already fetched (and pre-filtered to this
+    // endpoint) by runDiagnosis in one query for all endpoints, instead of
+    // querying here. Same logic as checkMissingIndexCandidate above, just
+    // without the per-endpoint database round trip.
+    private List<DiagnosisFinding> checkMissingIndexCandidateFromPlans(String endpoint, List<SlowQueryPlan> plans) {
         if (plans.isEmpty()) {
             return List.of();
         }

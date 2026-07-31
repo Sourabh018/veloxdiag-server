@@ -30,8 +30,24 @@ public class RuleEngineService {
         this.ruleDefinitionRepository = ruleDefinitionRepository;
     }
 
+    // Fetches enabled rules once. Callers looping over many endpoints
+    // (DiagnosisService.runDiagnosis) should call this ONCE outside the loop
+    // and pass the result into evaluate(endpoint, records, rules) below —
+    // rule_definitions doesn't change per-endpoint or mid-request, so
+    // refetching it per endpoint was pure waste (an N+1 against our own table).
+    public List<RuleDefinitionEntity> loadEnabledRules() {
+        return ruleDefinitionRepository.findByEnabledTrue();
+    }
+
+    // Convenience overload for single-endpoint callers (e.g.
+    // DiagnosisService.getFindingsForEndpoint, which only ever evaluates one
+    // endpoint per call — no batching benefit there, so fetching inline is fine).
     public List<DiagnosisFinding> evaluate(String endpoint, List<Telemetry> records) {
-        List<RuleDefinitionEntity> rules = ruleDefinitionRepository.findByEnabledTrue();
+        return evaluate(endpoint, records, loadEnabledRules());
+    }
+
+    public List<DiagnosisFinding> evaluate(String endpoint, List<Telemetry> records,
+                                            List<RuleDefinitionEntity> rules) {
         if (rules.isEmpty()) {
             return List.of();
         }
