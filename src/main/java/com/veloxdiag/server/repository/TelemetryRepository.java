@@ -5,7 +5,9 @@ import java.util.List;
 
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.veloxdiag.server.entity.Telemetry;
 
@@ -74,6 +76,15 @@ public interface TelemetryRepository extends JpaRepository<Telemetry, Long> {
     // same as above, scoped to one application — used when the app selector filters
     // Diagnosis/Query Analyzer/Index Advisor to a single app instead of "All Apps"
     List<Telemetry> findByApplicationNameAndTimestampAfter(String applicationName, LocalDateTime timestamp);
+
+    // Deletes every telemetry row for one application — used by the Settings page's
+    // "Reset [App] Data" button. Scoped to a single app deliberately: a reset for
+    // AgroMart must never touch CET_CELL's data and vice versa. @Modifying+@Transactional
+    // are required for JPQL DELETE/UPDATE queries to execute (plain @Query alone won't).
+    @Modifying
+    @Transactional
+    @Query("DELETE FROM Telemetry t WHERE t.applicationName = :applicationName")
+    int deleteByApplicationName(String applicationName);
 
     public interface SummaryProjection {
         Long getTotalRequests();
