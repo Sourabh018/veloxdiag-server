@@ -15,12 +15,18 @@ spring:
 server:
   port: 8080
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+
 gemini:
   api:
     key: ${GEMINI_KEY_1:},${GEMINI_KEY_2:},${GEMINI_KEY_3:}
 
 admin:
-  # Shared-secret token required to hit /api/admin/reset-application. Set this
-  # in Render's environment variables (NOT committed here, NOT a real secret
-  # value in this file) — leave unset locally to keep reset disabled by default.
   reset-token: ${ADMIN_RESET_TOKEN:}
