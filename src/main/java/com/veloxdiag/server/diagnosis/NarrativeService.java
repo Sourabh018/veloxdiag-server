@@ -31,17 +31,24 @@ public class NarrativeService {
     private static final String API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
     private static final String SYSTEM_PROMPT =
-            "You are a senior backend engineer reviewing diagnostic findings for one API endpoint. " +
-            "Given the findings below (each with a rule type, severity, message, and evidence), write a " +
-            "2-4 sentence explanation of the likely root cause. If multiple findings are present, state " +
-            "which is the primary driver and which are secondary, using the confidence/ratio data provided " +
-            "where available. Do not invent numbers, percentages, or facts that are not present in the " +
-            "input. If the evidence is inconclusive, say so plainly rather than guessing. " +
-            "Match your confidence language to each finding's stated severity and wording: a LOW-severity " +
-            "or 'possible'/'suspected' finding must be described with equally hedged language (e.g. " +
-            "'may indicate', 'a possible contributor') — do not upgrade it to definitive phrasing like " +
-            "'the primary driver' or 'is caused by' unless the finding itself is HIGH severity or stated " +
-            "as confirmed. Never let your narrative sound more certain than the underlying evidence.";
+            "You are a senior backend engineer explaining a performance finding to a teammate, in plain " +
+            "conversational language — not a compliance report. Given the findings below (each with a " +
+            "rule type, severity, message, and evidence), write a 2-4 sentence explanation of the likely " +
+            "root cause. Talk about what's actually happening in normal engineering language (e.g. 'this " +
+            "endpoint is firing dozens of extra queries per request' rather than repeating the rule type " +
+            "name in capitals like POSSIBLE_N_PLUS_ONE — mention the rule name at most once, only if it " +
+            "helps, never as the subject of a sentence). Lead with the most useful insight, not a summary " +
+            "of every finding in order. If multiple findings are present, state which is the primary " +
+            "driver and which are secondary, using the confidence/ratio data provided where available — " +
+            "but vary your sentence structure endpoint to endpoint rather than following the same " +
+            "template shape every time. Do not invent numbers, percentages, or facts that are not present " +
+            "in the input. If the evidence is inconclusive, say so plainly rather than guessing, but don't " +
+            "pad every sentence with hedging — hedge once, clearly, not throughout. " +
+            "Match your confidence language to each finding's stated severity: a LOW-severity or " +
+            "'possible'/'suspected' finding should read as tentative; don't upgrade it to definitive " +
+            "phrasing like 'the primary driver' or 'is caused by' unless the finding itself is HIGH " +
+            "severity or stated as confirmed. Never let your narrative sound more certain than the " +
+            "underlying evidence, but also don't sound like a legal disclaimer.";
 
     private final GeminiKeyRotator keyRotator;
     private final HttpClient httpClient;
@@ -147,7 +154,7 @@ public class NarrativeService {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", MODEL);
         root.put("max_tokens", 2048);
-        root.put("temperature", 0.3);
+        root.put("temperature", 0.7);
 
         ArrayNode messages = root.putArray("messages");
         ObjectNode systemMsg = messages.addObject();

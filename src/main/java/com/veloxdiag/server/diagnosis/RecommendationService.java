@@ -260,14 +260,18 @@ public class RecommendationService {
             "alternative in case it's the Node service instead.\n\n" +
             "Given the finding below (rule type, severity, message, and whatever real evidence is present), " +
             "write a detailed, endpoint-specific suggestion: 4-6 sentences plus one short illustrative code " +
-            "example. Reference the actual numbers given — do not write generic boilerplate that could " +
-            "apply to any endpoint. Explain not just WHAT to change but WHY it addresses this specific " +
-            "evidence (e.g. why a JOIN FETCH fixes a query count that spikes under load rather than staying " +
-            "flat). Do not invent an entity, table, or column name that isn't present in the input — keep " +
-            "code examples generic/illustrative if the real schema isn't known. If the evidence is " +
-            "borderline or inconclusive (e.g. sample size close to the minimum, or the effect size is " +
-            "small), say so plainly and suggest what additional evidence (more samples, a captured query " +
-            "plan, etc.) would make the fix more certain, rather than overstating confidence.";
+            "example. Write like you're messaging a teammate the fix, not filling out an incident report — " +
+            "vary your opening and sentence structure between findings rather than always starting with " +
+            "'To address the X finding on endpoint Y...'. Reference the actual numbers given, woven " +
+            "naturally into the explanation — do not write generic boilerplate that could apply to any " +
+            "endpoint, and don't restate the rule type name verbatim (say 'this looks like an N+1 pattern' " +
+            "not 'the POSSIBLE_N_PLUS_ONE finding'). Explain not just WHAT to change but WHY it addresses " +
+            "this specific evidence (e.g. why a JOIN FETCH fixes a query count that spikes under load " +
+            "rather than staying flat). Do not invent an entity, table, or column name that isn't present " +
+            "in the input — keep code examples generic/illustrative if the real schema isn't known. If the " +
+            "evidence is borderline or inconclusive (e.g. sample size close to the minimum, or the effect " +
+            "size is small), say so once, briefly, and suggest what additional evidence would help — don't " +
+            "repeat the caveat in multiple sentences or overstate confidence either way.";
 
     /**
      * On-demand, tailored version of the suggestion — mirrors NarrativeService's
@@ -334,11 +338,14 @@ public class RecommendationService {
 
     // Builds an OpenAI-compatible chat-completions request body: a system
     // message plus a user message, rather than Gemini's single blob of text.
-    private ObjectNode buildChatRequestBody(String systemPrompt, String userPrompt, int maxTokens) throws Exception {
+    // Temperature is higher for prose suggestions (natural, varied writing)
+    // and lower for the index-SQL call (precision matters more than style
+    // there — it's generating a CREATE INDEX statement, not an explanation).
+    private ObjectNode buildChatRequestBody(String systemPrompt, String userPrompt, int maxTokens, double temperature) throws Exception {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", MODEL);
         root.put("max_tokens", maxTokens);
-        root.put("temperature", 0.3);
+        root.put("temperature", temperature);
         ArrayNode messages = root.putArray("messages");
         ObjectNode systemMsg = messages.addObject();
         systemMsg.put("role", "system");
@@ -352,7 +359,7 @@ public class RecommendationService {
     // Tries current key; on 429 rotates and retries once per remaining key.
     // Returns null (never throws for 429) so caller falls back to template cleanly.
     private String callGroqForSuggestion(String systemPrompt, String userPrompt) throws Exception {
-        ObjectNode root = buildChatRequestBody(systemPrompt, userPrompt, 1500);
+        ObjectNode root = buildChatRequestBody(systemPrompt, userPrompt, 1500, 0.7);
         String requestBody = objectMapper.writeValueAsString(root);
 
         int attempts = Math.max(1, keyRotator.keyCount());
@@ -432,7 +439,7 @@ public class RecommendationService {
         String userPrompt = "SQL:\n" + plan.getSqlText() +
                 "\n\nEXPLAIN PLAN:\n" + plan.getExplainPlan();
 
-        ObjectNode root = buildChatRequestBody(INDEX_SYSTEM_PROMPT, userPrompt, 400);
+        ObjectNode root = buildChatRequestBody(INDEX_SYSTEM_PROMPT, userPrompt, 400, 0.3);
         String requestBody = objectMapper.writeValueAsString(root);
 
         int attempts = Math.max(1, keyRotator.keyCount());
