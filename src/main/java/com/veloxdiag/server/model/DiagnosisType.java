@@ -1,4 +1,4 @@
-package com.veloxdiag.model;
+package com.veloxdiag.server.model;
 
 public enum DiagnosisType {
     SLOW_REQUEST,

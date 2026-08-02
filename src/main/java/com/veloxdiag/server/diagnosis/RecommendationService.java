@@ -34,13 +34,21 @@ import java.util.stream.Collectors;
  * HIGH_ERROR_RATE / SERVER_ERROR findings intentionally produce no recommendation:
  * there's no generic fix for "something threw an error" without knowing the actual
  * exception, so suggesting one would be a fabricated, unhelpful guess.
+ *
+ * LLM provider: Groq (OpenAI-compatible chat completions API), swapped in from
+ * Gemini after the Gemini key pool ran out. GeminiKeyRotator is reused as-is —
+ * it's just a generic key list + rotation, provider-agnostic — only the HTTP
+ * call shape changed: Bearer auth header instead of ?key= query param, a
+ * messages[] array instead of contents[]/parts[], and choices[0].message.content
+ * instead of candidates[0].content.parts[0].text. No thinkingConfig equivalent
+ * needed — Groq's Llama models aren't reasoning models, so they don't eat into
+ * maxOutputTokens the way gemini-flash-latest did.
  */
 @Service
 public class RecommendationService {
 
-    private static final String MODEL = "gemini-flash-latest";
-    private static final String API_URL_TEMPLATE =
-            "https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent?key=%s";
+    private static final String MODEL = "llama-3.3-70b-versatile"; // confirm still current on Groq's model list before deploying
+    private static final String API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
     private static final String INDEX_SYSTEM_PROMPT =
             "You are a senior backend engineer. You are given a slow SQL query and its EXPLAIN plan " +
@@ -294,7 +302,7 @@ public class RecommendationService {
             return new RecommendationExplanation(endpoint, ruleType, fallbackText, false);
         }
 
-        String prompt = SUGGESTION_SYSTEM_PROMPT + "\n\n" +
+        String userPrompt =
                 "Endpoint: " + endpoint + "\n" +
                 "Rule type: " + finding.getRuleType() + "\n" +
                 "Severity: " + finding.getSeverity() + "\n" +
@@ -302,7 +310,7 @@ public class RecommendationService {
                 (finding.getEvidence() != null ? "Evidence: " + finding.getEvidence() + "\n" : "");
 
         try {
-            String result = callGeminiForSuggestion(prompt);
+            String result = callGroqForSuggestion(SUGGESTION_SYSTEM_PROMPT, userPrompt);
             if (result != null && !result.isBlank()) {
                 return new RecommendationExplanation(endpoint, ruleType, result, true);
             }
@@ -324,27 +332,36 @@ public class RecommendationService {
         return rec != null ? rec.getMessage() : "No fix template available for this finding.";
     }
 
-    private String callGeminiForSuggestion(String prompt) throws Exception {
+    // Builds an OpenAI-compatible chat-completions request body: a system
+    // message plus a user message, rather than Gemini's single blob of text.
+    private ObjectNode buildChatRequestBody(String systemPrompt, String userPrompt, int maxTokens) throws Exception {
         ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode contents = root.putArray("contents");
-        ObjectNode contentEntry = contents.addObject();
-        ArrayNode parts = contentEntry.putArray("parts");
-        parts.addObject().put("text", prompt);
-        ObjectNode generationConfig = root.putObject("generationConfig");
-        generationConfig.put("maxOutputTokens", 1500);
-        // Stops gemini-flash-latest's internal "thinking" tokens from eating into
-        // maxOutputTokens and truncating the actual suggestion mid-sentence —
-        // the real fix, instead of raising the token cap again each time this shows up.
-        generationConfig.putObject("thinkingConfig").put("thinkingBudget", 0);
+        root.put("model", MODEL);
+        root.put("max_tokens", maxTokens);
+        root.put("temperature", 0.3);
+        ArrayNode messages = root.putArray("messages");
+        ObjectNode systemMsg = messages.addObject();
+        systemMsg.put("role", "system");
+        systemMsg.put("content", systemPrompt);
+        ObjectNode userMsg = messages.addObject();
+        userMsg.put("role", "user");
+        userMsg.put("content", userPrompt);
+        return root;
+    }
+
+    // Tries current key; on 429 rotates and retries once per remaining key.
+    // Returns null (never throws for 429) so caller falls back to template cleanly.
+    private String callGroqForSuggestion(String systemPrompt, String userPrompt) throws Exception {
+        ObjectNode root = buildChatRequestBody(systemPrompt, userPrompt, 1500);
         String requestBody = objectMapper.writeValueAsString(root);
 
         int attempts = Math.max(1, keyRotator.keyCount());
         for (int i = 0; i < attempts; i++) {
-            String url = String.format(API_URL_TEMPLATE, keyRotator.current());
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
+                    .uri(URI.create(API_URL))
                     .timeout(Duration.ofSeconds(30))
                     .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer " + keyRotator.current())
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .build();
 
@@ -352,20 +369,17 @@ public class RecommendationService {
 
             if (response.statusCode() == 200) {
                 JsonNode responseRoot = objectMapper.readTree(response.body());
-                JsonNode candidates = responseRoot.path("candidates");
-                if (candidates.isArray() && candidates.size() > 0) {
-                    String finishReason = candidates.get(0).path("finishReason").asText("UNKNOWN");
-                    System.out.println("[VeloxDiag] Gemini suggestion finishReason=" + finishReason);
-                    JsonNode textParts = candidates.get(0).path("content").path("parts");
-                    if (textParts.isArray() && textParts.size() > 0) {
-                        String text = textParts.get(0).path("text").asText();
-                        return text.isBlank() ? null : text.trim();
-                    }
+                JsonNode choices = responseRoot.path("choices");
+                if (choices.isArray() && choices.size() > 0) {
+                    String finishReason = choices.get(0).path("finish_reason").asText("unknown");
+                    System.out.println("[VeloxDiag] Groq suggestion finish_reason=" + finishReason);
+                    String text = choices.get(0).path("message").path("content").asText();
+                    return text.isBlank() ? null : text.trim();
                 }
                 return null;
             }
 
-            System.out.println("[VeloxDiag] Gemini suggestion call failed status=" + response.statusCode() + " body=" + response.body().substring(0, Math.min(200, response.body().length())));
+            System.out.println("[VeloxDiag] Groq suggestion call failed status=" + response.statusCode() + " body=" + response.body().substring(0, Math.min(200, response.body().length())));
             if (response.statusCode() == 429 && keyRotator.rotate()) {
                 continue;
             }
@@ -393,7 +407,7 @@ public class RecommendationService {
         }
 
         try {
-            String aiResult = callGeminiForIndex(seqScanPlan);
+            String aiResult = callGroqForIndex(seqScanPlan);
             if (aiResult != null) {
                 String[] parts = parseSqlWhy(aiResult);
                 return new Recommendation(endpoint, finding.getSeverity(), finding.getRuleType(),
@@ -414,27 +428,20 @@ public class RecommendationService {
 
     // Tries current key; on 429 rotates and retries once per remaining key.
     // Returns null (never throws for 429) so caller falls back to template cleanly.
-    private String callGeminiForIndex(SlowQueryPlan plan) throws Exception {
-        String prompt = INDEX_SYSTEM_PROMPT + "\n\nSQL:\n" + plan.getSqlText() +
+    private String callGroqForIndex(SlowQueryPlan plan) throws Exception {
+        String userPrompt = "SQL:\n" + plan.getSqlText() +
                 "\n\nEXPLAIN PLAN:\n" + plan.getExplainPlan();
 
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode contents = root.putArray("contents");
-        ObjectNode contentEntry = contents.addObject();
-        ArrayNode parts = contentEntry.putArray("parts");
-        parts.addObject().put("text", prompt);
-        ObjectNode generationConfig = root.putObject("generationConfig");
-        generationConfig.put("maxOutputTokens", 400);
-        generationConfig.putObject("thinkingConfig").put("thinkingBudget", 0);
+        ObjectNode root = buildChatRequestBody(INDEX_SYSTEM_PROMPT, userPrompt, 400);
         String requestBody = objectMapper.writeValueAsString(root);
 
         int attempts = Math.max(1, keyRotator.keyCount());
         for (int i = 0; i < attempts; i++) {
-            String url = String.format(API_URL_TEMPLATE, keyRotator.current());
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
+                    .uri(URI.create(API_URL))
                     .timeout(Duration.ofSeconds(30))
                     .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer " + keyRotator.current())
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .build();
 
@@ -442,13 +449,10 @@ public class RecommendationService {
 
             if (response.statusCode() == 200) {
                 JsonNode responseRoot = objectMapper.readTree(response.body());
-                JsonNode candidates = responseRoot.path("candidates");
-                if (candidates.isArray() && candidates.size() > 0) {
-                    JsonNode textParts = candidates.get(0).path("content").path("parts");
-                    if (textParts.isArray() && textParts.size() > 0) {
-                        String text = textParts.get(0).path("text").asText();
-                        return text.isBlank() ? null : text.trim();
-                    }
+                JsonNode choices = responseRoot.path("choices");
+                if (choices.isArray() && choices.size() > 0) {
+                    String text = choices.get(0).path("message").path("content").asText();
+                    return text.isBlank() ? null : text.trim();
                 }
                 return null;
             }
