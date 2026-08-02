@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -16,11 +17,35 @@ import java.util.stream.Collectors;
 @Service
 public class DiagnosisService {
 
-    private double slowRequestThresholdMs = 1000.0;
-    private long highErrorRateThreshold = 3;
-    private int serverErrorStatusThreshold = 500;
-    private long possibleNPlusOneQueryThreshold = 15;
-    private long seqScanRowThreshold = 500;
+    static final String DEFAULT_KEY = "__default__";
+
+    /**
+     * Immutable snapshot of the five rule thresholds for one evaluation run.
+     * Resolved once per runDiagnosis(applicationName) call and threaded through
+     * every private check method as a parameter, instead of each method reading
+     * a shared mutable instance field directly — that's what makes per-application
+     * thresholds possible without a data race between concurrent requests for
+     * different applications.
+     */
+    private static class Thresholds {
+        final double slowRequestThresholdMs;
+        final long highErrorRateThreshold;
+        final int serverErrorStatusThreshold;
+        final long possibleNPlusOneQueryThreshold;
+        final long seqScanRowThreshold;
+
+        Thresholds(double slowRequestThresholdMs, long highErrorRateThreshold, int serverErrorStatusThreshold,
+                   long possibleNPlusOneQueryThreshold, long seqScanRowThreshold) {
+            this.slowRequestThresholdMs = slowRequestThresholdMs;
+            this.highErrorRateThreshold = highErrorRateThreshold;
+            this.serverErrorStatusThreshold = serverErrorStatusThreshold;
+            this.possibleNPlusOneQueryThreshold = possibleNPlusOneQueryThreshold;
+            this.seqScanRowThreshold = seqScanRowThreshold;
+        }
+    }
+
+    private final Map<String, Thresholds> thresholdsByApp = new ConcurrentHashMap<>();
+
     private static final long MIN_SAMPLE_COUNT = 6;
 
     private final TelemetryRepository telemetryRepository;
@@ -38,22 +63,67 @@ public class DiagnosisService {
         this.windowSettings = windowSettings;
         this.ruleEngineService = ruleEngineService;
         this.slowQueryPlanRepository = slowQueryPlanRepository;
+        thresholdsByApp.put(DEFAULT_KEY, new Thresholds(1000.0, 3, 500, 15, 500));
     }
 
-    public double getSlowRequestThresholdMs() { return slowRequestThresholdMs; }
-    public void setSlowRequestThresholdMs(double value) { this.slowRequestThresholdMs = value; }
+    private static String resolveKey(String applicationName) {
+        return (applicationName == null || applicationName.isBlank()) ? DEFAULT_KEY : applicationName;
+    }
 
-    public long getHighErrorRateThreshold() { return highErrorRateThreshold; }
-    public void setHighErrorRateThreshold(long value) { this.highErrorRateThreshold = value; }
+    private Thresholds resolveThresholds(String applicationName) {
+        return thresholdsByApp.getOrDefault(resolveKey(applicationName), thresholdsByApp.get(DEFAULT_KEY));
+    }
 
-    public int getServerErrorStatusThreshold() { return serverErrorStatusThreshold; }
-    public void setServerErrorStatusThreshold(int value) { this.serverErrorStatusThreshold = value; }
+    // ---- Per-application threshold getters/setters, used by SettingsController ----
 
-    public long getPossibleNPlusOneQueryThreshold() { return possibleNPlusOneQueryThreshold; }
-    public void setPossibleNPlusOneQueryThreshold(long value) { this.possibleNPlusOneQueryThreshold = value; }
+    public double getSlowRequestThresholdMs(String applicationName) { return resolveThresholds(applicationName).slowRequestThresholdMs; }
+    public long getHighErrorRateThreshold(String applicationName) { return resolveThresholds(applicationName).highErrorRateThreshold; }
+    public int getServerErrorStatusThreshold(String applicationName) { return resolveThresholds(applicationName).serverErrorStatusThreshold; }
+    public long getPossibleNPlusOneQueryThreshold(String applicationName) { return resolveThresholds(applicationName).possibleNPlusOneQueryThreshold; }
+    public long getSeqScanRowThreshold(String applicationName) { return resolveThresholds(applicationName).seqScanRowThreshold; }
 
-    public long getSeqScanRowThreshold() { return seqScanRowThreshold; }
-    public void setSeqScanRowThreshold(long value) { this.seqScanRowThreshold = value; }
+    public void setThresholds(String applicationName, double slowRequestThresholdMs, long highErrorRateThreshold,
+                               int serverErrorStatusThreshold, long possibleNPlusOneQueryThreshold, long seqScanRowThreshold) {
+        thresholdsByApp.put(resolveKey(applicationName), new Thresholds(
+                slowRequestThresholdMs, highErrorRateThreshold, serverErrorStatusThreshold,
+                possibleNPlusOneQueryThreshold, seqScanRowThreshold
+        ));
+    }
+
+    // ---- No-arg / single-value overloads, operating on the DEFAULT_KEY bucket ----
+    // Kept for any caller not yet passing an applicationName (e.g. buildDefaultFor
+    // seed values in SettingsController, or the single-endpoint narrative lookup
+    // path which has no application context — see getFindingsForEndpoint below).
+
+    public double getSlowRequestThresholdMs() { return getSlowRequestThresholdMs(null); }
+    public void setSlowRequestThresholdMs(double value) {
+        Thresholds t = resolveThresholds(null);
+        setThresholds(null, value, t.highErrorRateThreshold, t.serverErrorStatusThreshold, t.possibleNPlusOneQueryThreshold, t.seqScanRowThreshold);
+    }
+
+    public long getHighErrorRateThreshold() { return getHighErrorRateThreshold(null); }
+    public void setHighErrorRateThreshold(long value) {
+        Thresholds t = resolveThresholds(null);
+        setThresholds(null, t.slowRequestThresholdMs, value, t.serverErrorStatusThreshold, t.possibleNPlusOneQueryThreshold, t.seqScanRowThreshold);
+    }
+
+    public int getServerErrorStatusThreshold() { return getServerErrorStatusThreshold(null); }
+    public void setServerErrorStatusThreshold(int value) {
+        Thresholds t = resolveThresholds(null);
+        setThresholds(null, t.slowRequestThresholdMs, t.highErrorRateThreshold, value, t.possibleNPlusOneQueryThreshold, t.seqScanRowThreshold);
+    }
+
+    public long getPossibleNPlusOneQueryThreshold() { return getPossibleNPlusOneQueryThreshold(null); }
+    public void setPossibleNPlusOneQueryThreshold(long value) {
+        Thresholds t = resolveThresholds(null);
+        setThresholds(null, t.slowRequestThresholdMs, t.highErrorRateThreshold, t.serverErrorStatusThreshold, value, t.seqScanRowThreshold);
+    }
+
+    public long getSeqScanRowThreshold() { return getSeqScanRowThreshold(null); }
+    public void setSeqScanRowThreshold(long value) {
+        Thresholds t = resolveThresholds(null);
+        setThresholds(null, t.slowRequestThresholdMs, t.highErrorRateThreshold, t.serverErrorStatusThreshold, t.possibleNPlusOneQueryThreshold, value);
+    }
 
     public List<DiagnosisFinding> runDiagnosis() {
         return runDiagnosis(null);
@@ -63,15 +133,13 @@ public class DiagnosisService {
     // same combined behavior as runDiagnosis() above. Filtering happens before
     // grouping by endpoint so cross-app endpoint-name collisions (unlikely, but
     // possible) can't mix findings from two different applications together.
-    //
-    // PERFORMANCE NOTE (fixed — was an N+1 against our own tables): this method
-    // loops over every distinct endpoint. Previously, computeEndpointFindings
-    // re-fetched the full rule_definitions table AND re-queried slow_query_plans
-    // once PER endpoint — with ~15+ endpoints across apps, every dashboard poll
-    // fired 30+ near-identical queries. Both are now fetched ONCE here and
-    // passed into the loop, then filtered/grouped in memory per endpoint.
+    // Thresholds are now resolved once here for the specific application being
+    // diagnosed (falling back to DEFAULT_KEY for "All Apps"), instead of reading
+    // one shared mutable field — this is what makes per-app threshold tuning
+    // actually affect evaluation results, not just the Settings page display.
     public List<DiagnosisFinding> runDiagnosis(String applicationName) {
-        LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays(applicationName));
+        Thresholds thresholds = resolveThresholds(applicationName);
         List<Telemetry> allTelemetry = (applicationName == null || applicationName.isBlank())
                 ? telemetryRepository.findByTimestampAfter(cutoff)
                 : telemetryRepository.findByApplicationNameAndTimestampAfter(applicationName, cutoff);
@@ -80,7 +148,6 @@ public class DiagnosisService {
         Map<String, List<Telemetry>> byEndpoint = allTelemetry.stream()
                 .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
 
-        // Fetched once for the whole run, not once per endpoint.
         List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules =
                 ruleEngineService.loadEnabledRules();
 
@@ -91,54 +158,59 @@ public class DiagnosisService {
         for (Map.Entry<String, List<Telemetry>> entry : byEndpoint.entrySet()) {
             String endpoint = entry.getKey();
             List<SlowQueryPlan> plansForEndpoint = plansByEndpoint.getOrDefault(endpoint, List.of());
-            findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, rules));
+            findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, rules, thresholds));
         }
 
         return findings;
     }
 
-    // Batched path — used by runDiagnosis, takes pre-fetched rules and
-    // pre-fetched (already endpoint-filtered) seq-scan plans so no query
-    // happens inside this method at all.
+    // Batched path — used by runDiagnosis, takes pre-fetched rules, pre-fetched
+    // (already endpoint-filtered) seq-scan plans, and the resolved thresholds
+    // for the application being diagnosed.
     private List<DiagnosisFinding> computeEndpointFindings(
             String endpoint, List<Telemetry> records, List<SlowQueryPlan> seqScanPlans,
-            List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules) {
+            List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules, Thresholds thresholds) {
         List<DiagnosisFinding> endpointFindings = new ArrayList<>();
-        endpointFindings.addAll(checkSlowRequest(endpoint, records));
-        endpointFindings.addAll(checkHighErrorRate(endpoint, records));
-        endpointFindings.addAll(checkServerErrors(endpoint, records));
-        endpointFindings.addAll(checkPossibleNPlusOne(endpoint, records));
-        endpointFindings.addAll(checkMissingIndexCandidateFromPlans(endpoint, seqScanPlans));
+        endpointFindings.addAll(checkSlowRequest(endpoint, records, thresholds));
+        endpointFindings.addAll(checkHighErrorRate(endpoint, records, thresholds));
+        endpointFindings.addAll(checkServerErrors(endpoint, records, thresholds));
+        endpointFindings.addAll(checkPossibleNPlusOne(endpoint, records, thresholds));
+        endpointFindings.addAll(checkMissingIndexCandidateFromPlans(endpoint, seqScanPlans, thresholds));
 
         List<DiagnosisFinding> combined = new ArrayList<>(endpointFindings);
-        combined.addAll(correlateFindings(endpoint, records, endpointFindings));
+        combined.addAll(correlateFindings(endpoint, records, endpointFindings, thresholds));
         combined.addAll(ruleEngineService.evaluate(endpoint, records, rules));
 
         return combined;
     }
 
     // Unbatched path — used only by getFindingsForEndpoint, which evaluates a
-    // single endpoint on demand (e.g. the "Explain this" narrative fetch).
-    // No batching benefit for exactly one endpoint, so this fetches inline as
-    // before; kept as a separate method rather than overloading with nulls.
+    // single endpoint on demand (e.g. the "Explain this" narrative fetch). This
+    // path has no application context (endpoint names are looked up without
+    // knowing which app they belong to), so it uses the DEFAULT_KEY thresholds.
+    // Known limitation: if the same endpoint name exists in two different apps
+    // with different tuned thresholds, this path won't pick the right one —
+    // narrow gap, only affects the single-endpoint narrative/explain feature,
+    // not the main Diagnosis/Dashboard/Index Advisor views.
     private List<DiagnosisFinding> computeEndpointFindings(String endpoint, List<Telemetry> records,
                                                              LocalDateTime cutoff) {
+        Thresholds thresholds = resolveThresholds(null);
         List<DiagnosisFinding> endpointFindings = new ArrayList<>();
-        endpointFindings.addAll(checkSlowRequest(endpoint, records));
-        endpointFindings.addAll(checkHighErrorRate(endpoint, records));
-        endpointFindings.addAll(checkServerErrors(endpoint, records));
-        endpointFindings.addAll(checkPossibleNPlusOne(endpoint, records));
-        endpointFindings.addAll(checkMissingIndexCandidate(endpoint, cutoff));
+        endpointFindings.addAll(checkSlowRequest(endpoint, records, thresholds));
+        endpointFindings.addAll(checkHighErrorRate(endpoint, records, thresholds));
+        endpointFindings.addAll(checkServerErrors(endpoint, records, thresholds));
+        endpointFindings.addAll(checkPossibleNPlusOne(endpoint, records, thresholds));
+        endpointFindings.addAll(checkMissingIndexCandidate(endpoint, cutoff, thresholds));
 
         List<DiagnosisFinding> combined = new ArrayList<>(endpointFindings);
-        combined.addAll(correlateFindings(endpoint, records, endpointFindings));
+        combined.addAll(correlateFindings(endpoint, records, endpointFindings, thresholds));
         combined.addAll(ruleEngineService.evaluate(endpoint, records));
 
         return combined;
     }
 
     public List<DiagnosisFinding> getFindingsForEndpoint(String endpoint) {
-        LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays(null));
         List<Telemetry> records = telemetryRepository.findByTimestampAfter(cutoff).stream()
                 .filter(t -> endpoint.equals(EndpointNormalizer.normalize(t.getEndpoint())))
                 .collect(Collectors.toList());
@@ -146,13 +218,13 @@ public class DiagnosisService {
         return computeEndpointFindings(endpoint, records, cutoff);
     }
 
-    private List<DiagnosisFinding> checkSlowRequest(String endpoint, List<Telemetry> records) {
+    private List<DiagnosisFinding> checkSlowRequest(String endpoint, List<Telemetry> records, Thresholds thresholds) {
         double avgDuration = records.stream()
                 .mapToLong(Telemetry::getDurationMs)
                 .average()
                 .orElse(0.0);
 
-        if (avgDuration > slowRequestThresholdMs) {
+        if (avgDuration > thresholds.slowRequestThresholdMs) {
             boolean insufficientSamples = records.size() < MIN_SAMPLE_COUNT;
             String severity = insufficientSamples
                     ? "LOW"
@@ -167,21 +239,21 @@ public class DiagnosisService {
                     ? String.format("Endpoint %s is averaging %.0fms per request, above the %.0fms threshold — " +
                                     "but this is based on only %d sample(s), too few to reliably call this a systemic " +
                                     "slowdown rather than a one-off (e.g. cold start).",
-                            endpoint, avgDuration, slowRequestThresholdMs, records.size())
+                            endpoint, avgDuration, thresholds.slowRequestThresholdMs, records.size())
                     : String.format("Endpoint %s is averaging %.0fms per request, above the %.0fms threshold.",
-                            endpoint, avgDuration, slowRequestThresholdMs);
+                            endpoint, avgDuration, thresholds.slowRequestThresholdMs);
 
             return List.of(new DiagnosisFinding("SLOW_REQUEST", severity, endpoint, message, evidence));
         }
         return List.of();
     }
 
-    private List<DiagnosisFinding> checkHighErrorRate(String endpoint, List<Telemetry> records) {
+    private List<DiagnosisFinding> checkHighErrorRate(String endpoint, List<Telemetry> records, Thresholds thresholds) {
         long errorCount = records.stream()
                 .filter(t -> t.getStatus() >= 400)
                 .count();
 
-        if (errorCount >= highErrorRateThreshold) {
+        if (errorCount >= thresholds.highErrorRateThreshold) {
             String severity = errorCount >= 10 ? "HIGH" : "MEDIUM";
             Map<String, Object> evidence = new HashMap<>();
             evidence.put("errorCount", errorCount);
@@ -199,9 +271,9 @@ public class DiagnosisService {
         return List.of();
     }
 
-    private List<DiagnosisFinding> checkServerErrors(String endpoint, List<Telemetry> records) {
+    private List<DiagnosisFinding> checkServerErrors(String endpoint, List<Telemetry> records, Thresholds thresholds) {
         long serverErrorCount = records.stream()
-                .filter(t -> t.getStatus() >= serverErrorStatusThreshold)
+                .filter(t -> t.getStatus() >= thresholds.serverErrorStatusThreshold)
                 .count();
 
         if (serverErrorCount > 0) {
@@ -220,7 +292,7 @@ public class DiagnosisService {
         return List.of();
     }
 
-    private List<DiagnosisFinding> checkPossibleNPlusOne(String endpoint, List<Telemetry> records) {
+    private List<DiagnosisFinding> checkPossibleNPlusOne(String endpoint, List<Telemetry> records, Thresholds thresholds) {
         List<Long> counts = records.stream()
                 .map(Telemetry::getQueryCount)
                 .filter(Objects::nonNull)
@@ -233,7 +305,7 @@ public class DiagnosisService {
         double avgQueryCount = counts.stream().mapToLong(Long::longValue).average().orElse(0.0);
         long maxQueryCount = counts.stream().mapToLong(Long::longValue).max().orElse(0);
 
-        if (maxQueryCount > possibleNPlusOneQueryThreshold) {
+        if (maxQueryCount > thresholds.possibleNPlusOneQueryThreshold) {
             boolean insufficientSamples = counts.size() < MIN_SAMPLE_COUNT;
             String severity = insufficientSamples
                     ? "LOW"
@@ -260,7 +332,7 @@ public class DiagnosisService {
     }
 
     private List<DiagnosisFinding> correlateFindings(String endpoint, List<Telemetry> records,
-                                                       List<DiagnosisFinding> endpointFindings) {
+                                                       List<DiagnosisFinding> endpointFindings, Thresholds thresholds) {
         boolean hasSlowRequest = endpointFindings.stream()
                 .anyMatch(f -> f.getRuleType().equals("SLOW_REQUEST"));
         boolean hasNPlusOne = endpointFindings.stream()
@@ -271,10 +343,10 @@ public class DiagnosisService {
         }
 
         List<Telemetry> spikyRecords = records.stream()
-                .filter(t -> t.getQueryCount() != null && t.getQueryCount() > possibleNPlusOneQueryThreshold)
+                .filter(t -> t.getQueryCount() != null && t.getQueryCount() > thresholds.possibleNPlusOneQueryThreshold)
                 .collect(Collectors.toList());
         List<Telemetry> normalRecords = records.stream()
-                .filter(t -> t.getQueryCount() != null && t.getQueryCount() <= possibleNPlusOneQueryThreshold)
+                .filter(t -> t.getQueryCount() != null && t.getQueryCount() <= thresholds.possibleNPlusOneQueryThreshold)
                 .collect(Collectors.toList());
 
         OptionalDouble spikyAvgDurationOpt = spikyRecords.stream()
@@ -306,14 +378,14 @@ public class DiagnosisService {
                 message = String.format(
                         "High duration on %s is likely driven by its N+1 query pattern: requests with more than %d queries " +
                                 "averaged %.0fms (n=%d) vs %.0fms (n=%d) for requests at or below that threshold — roughly %.1fx slower.",
-                        endpoint, possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
+                        endpoint, thresholds.possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
             } else if (ratio > 1.0) {
                 confidence = "MEDIUM";
                 message = String.format(
                         "High duration on %s may be partially driven by its N+1 query pattern: requests with more than %d queries " +
                                 "averaged %.0fms (n=%d) vs %.0fms (n=%d) for requests at or below that threshold — roughly %.1fx slower, " +
                                 "a modest but directionally consistent difference.",
-                        endpoint, possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
+                        endpoint, thresholds.possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
             } else {
                 confidence = "LOW";
                 message = String.format(
@@ -321,7 +393,7 @@ public class DiagnosisService {
                                 "the primary driver of the slowness: requests with more than %d queries averaged %.0fms (n=%d) vs " +
                                 "%.0fms (n=%d) for requests at or below that threshold — roughly %.1fx, i.e. no slower (or faster). " +
                                 "The two findings likely have separate causes.",
-                        endpoint, possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
+                        endpoint, thresholds.possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
             }
         } else {
             confidence = "MEDIUM";
@@ -343,17 +415,17 @@ public class DiagnosisService {
         ));
     }
 
-    private List<DiagnosisFinding> checkMissingIndexCandidate(String endpoint, LocalDateTime cutoff) {
+    private List<DiagnosisFinding> checkMissingIndexCandidate(String endpoint, LocalDateTime cutoff, Thresholds thresholds) {
         List<SlowQueryPlan> plans = slowQueryPlanRepository
                 .findByEndpointAndContainsSeqScanTrueAndTimestampAfter(endpoint, cutoff);
-        return checkMissingIndexCandidateFromPlans(endpoint, plans);
+        return checkMissingIndexCandidateFromPlans(endpoint, plans, thresholds);
     }
 
     // Batched variant — takes plans already fetched (and pre-filtered to this
     // endpoint) by runDiagnosis in one query for all endpoints, instead of
     // querying here. Same logic as checkMissingIndexCandidate above, just
     // without the per-endpoint database round trip.
-    private List<DiagnosisFinding> checkMissingIndexCandidateFromPlans(String endpoint, List<SlowQueryPlan> plans) {
+    private List<DiagnosisFinding> checkMissingIndexCandidateFromPlans(String endpoint, List<SlowQueryPlan> plans, Thresholds thresholds) {
         if (plans.isEmpty()) {
             return List.of();
         }
@@ -370,7 +442,7 @@ public class DiagnosisService {
         }
 
         Map<String, Long> candidateTables = maxRowsPerTable.entrySet().stream()
-                .filter(e -> e.getValue() > seqScanRowThreshold)
+                .filter(e -> e.getValue() > thresholds.seqScanRowThreshold)
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
 
         if (candidateTables.isEmpty()) {
@@ -387,7 +459,7 @@ public class DiagnosisService {
         Map<String, Object> evidence = new HashMap<>();
         evidence.put("candidateTables", candidateTables);
         evidence.put("planSampleCount", plans.size());
-        evidence.put("rowThreshold", seqScanRowThreshold);
+        evidence.put("rowThreshold", thresholds.seqScanRowThreshold);
 
         return List.of(new DiagnosisFinding(
                 "MISSING_INDEX_CANDIDATE",

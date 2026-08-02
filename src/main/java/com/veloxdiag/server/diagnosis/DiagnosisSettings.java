@@ -2,6 +2,7 @@ package com.veloxdiag.server.diagnosis;
 
 public class DiagnosisSettings {
 
+    private String applicationName;
     private double slowRequestThresholdMs;
     private long highErrorRateThreshold;
     private int serverErrorStatusThreshold;
@@ -14,10 +15,11 @@ public class DiagnosisSettings {
     public DiagnosisSettings() {
     }
 
-    public DiagnosisSettings(double slowRequestThresholdMs, long highErrorRateThreshold,
+    public DiagnosisSettings(String applicationName, double slowRequestThresholdMs, long highErrorRateThreshold,
                               int serverErrorStatusThreshold, int lookbackDays,
                               long possibleNPlusOneQueryThreshold, long seqScanRowThreshold,
                               double minAvgDurationMs, double lowVarianceThreshold) {
+        this.applicationName = applicationName;
         this.slowRequestThresholdMs = slowRequestThresholdMs;
         this.highErrorRateThreshold = highErrorRateThreshold;
         this.serverErrorStatusThreshold = serverErrorStatusThreshold;
@@ -27,6 +29,9 @@ public class DiagnosisSettings {
         this.minAvgDurationMs = minAvgDurationMs;
         this.lowVarianceThreshold = lowVarianceThreshold;
     }
+
+    public String getApplicationName() { return applicationName; }
+    public void setApplicationName(String applicationName) { this.applicationName = applicationName; }
 
     public double getSlowRequestThresholdMs() { return slowRequestThresholdMs; }
     public void setSlowRequestThresholdMs(double slowRequestThresholdMs) { this.slowRequestThresholdMs = slowRequestThresholdMs; }

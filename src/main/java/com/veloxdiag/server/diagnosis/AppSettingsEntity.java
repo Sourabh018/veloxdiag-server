@@ -5,21 +5,19 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 /**
- * Single-row persistence for DiagnosisSettings, so values survive server
+ * Per-application persistence for DiagnosisSettings, so values survive server
  * restarts/redeploys instead of resetting to hardcoded defaults.
  *
- * Always read/written by fixed id = 1L — this table is never meant to hold
- * more than one row. DiagnosisService, TelemetryWindowSettings, and
- * IndexAdvisorService remain the live, in-memory sources of truth that the
- * diagnosis engines read from; this entity only exists to re-hydrate them
- * on startup.
+ * One row per application, keyed by applicationName — CET_CELL and AgroMart
+ * (and any future app) each get their own independently-tunable thresholds.
+ * This replaces the earlier single-row-fixed-at-id=1L design.
  */
 @Entity
 @Table(name = "app_settings")
 public class AppSettingsEntity {
 
     @Id
-    private Long id = 1L;
+    private String applicationName;
 
     private double slowRequestThresholdMs;
     private long highErrorRateThreshold;
@@ -33,11 +31,11 @@ public class AppSettingsEntity {
     public AppSettingsEntity() {
     }
 
-    public AppSettingsEntity(double slowRequestThresholdMs, long highErrorRateThreshold,
+    public AppSettingsEntity(String applicationName, double slowRequestThresholdMs, long highErrorRateThreshold,
                               int serverErrorStatusThreshold, int lookbackDays,
                               long possibleNPlusOneQueryThreshold, long seqScanRowThreshold,
                               double minAvgDurationMs, double lowVarianceThreshold) {
-        this.id = 1L;
+        this.applicationName = applicationName;
         this.slowRequestThresholdMs = slowRequestThresholdMs;
         this.highErrorRateThreshold = highErrorRateThreshold;
         this.serverErrorStatusThreshold = serverErrorStatusThreshold;
@@ -48,8 +46,8 @@ public class AppSettingsEntity {
         this.lowVarianceThreshold = lowVarianceThreshold;
     }
 
-    public Long getId() { return id; }
-    public void setId(Long id) { this.id = id; }
+    public String getApplicationName() { return applicationName; }
+    public void setApplicationName(String applicationName) { this.applicationName = applicationName; }
 
     public double getSlowRequestThresholdMs() { return slowRequestThresholdMs; }
     public void setSlowRequestThresholdMs(double slowRequestThresholdMs) { this.slowRequestThresholdMs = slowRequestThresholdMs; }
