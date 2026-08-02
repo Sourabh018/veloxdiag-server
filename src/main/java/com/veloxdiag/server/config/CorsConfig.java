@@ -8,16 +8,18 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 @Configuration
 public class CorsConfig implements WebMvcConfigurer {
 
-    // Dashboard now deployed publicly (Vercel) in addition to local dev.
-    // Both origins allowed — localhost for continued local dev/testing,
-    // Vercel domain for the public deployment.
+    // Locked to exact deployed origins — dashboard, AgroMart frontend, AgroMart
+    // admin — plus localhost for local dev. Wildcard *.vercel.app removed
+    // (Roadmap P0 #3).
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/api/**")
-                .allowedOriginPatterns(
-                        "http://localhost:*",
-                        "https://*.vercel.app"
+                .allowedOrigins(
+                        "https://veloxdiag.vercel.app",
+                        "https://agromart-frontend-one.vercel.app",
+                        "https://agromart-admin-red.vercel.app"
                 )
+                .allowedOriginPatterns("http://localhost:*")
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                 .allowedHeaders("*")
                 .allowCredentials(true);
