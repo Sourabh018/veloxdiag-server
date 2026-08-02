@@ -24,12 +24,12 @@ management:
     health:
       show-details: never
 
-gemini:
+groq:
   api:
-    key: ${GEMINI_KEY_1:},${GEMINI_KEY_2:},${GEMINI_KEY_3:}
+    key: ${GROQ_KEY_1:},${GROQ_KEY_2:},${GROQ_KEY_3:}
 
 admin:
   reset-token: ${ADMIN_RESET_TOKEN:}
-  
-telemetry:
+
+telemetry: 
   ingest-token: ${TELEMETRY_INGEST_TOKEN:}
