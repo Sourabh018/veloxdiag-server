@@ -30,3 +30,6 @@ gemini:
 
 admin:
   reset-token: ${ADMIN_RESET_TOKEN:}
+  
+telemetry:
+  ingest-token: ${TELEMETRY_INGEST_TOKEN:}
