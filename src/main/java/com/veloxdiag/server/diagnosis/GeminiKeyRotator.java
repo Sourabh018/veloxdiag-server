@@ -8,13 +8,18 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Holds a list of Gemini API keys and rotates to the next one when the
+ * Holds a list of Groq API keys and rotates to the next one when the
  * current key hits a 429 (quota exceeded). Shared by NarrativeService and
  * RecommendationService so both features benefit from the same pool.
  *
- * Config: gemini.api.key can be a single key OR a comma-separated list.
+ * Class name/internal references kept as "GeminiKeyRotator" to avoid
+ * touching every constructor call site across the project — this class was
+ * always provider-agnostic (just a key list + rotation index), only the
+ * config property name changed to reflect the actual provider now in use.
+ *
+ * Config: groq.api.key can be a single key OR a comma-separated list.
  * Example application.properties:
- *   gemini.api.key=${GEMINI_KEY_1},${GEMINI_KEY_2},${GEMINI_KEY_3}
+ *   groq.api.key=${GROQ_KEY_1},${GROQ_KEY_2},${GROQ_KEY_3}
  */
 @Component
 public class GeminiKeyRotator {
@@ -22,7 +27,7 @@ public class GeminiKeyRotator {
     private final List<String> keys;
     private final AtomicInteger index = new AtomicInteger(0);
 
-    public GeminiKeyRotator(@Value("${gemini.api.key:}") String keysCsv) {
+    public GeminiKeyRotator(@Value("${groq.api.key:}") String keysCsv) {
         List<String> parsed = new ArrayList<>();
         if (keysCsv != null && !keysCsv.isBlank()) {
             for (String k : keysCsv.split(",")) {

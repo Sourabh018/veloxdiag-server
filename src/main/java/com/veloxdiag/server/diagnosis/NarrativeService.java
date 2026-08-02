@@ -14,12 +14,21 @@ import java.time.Duration;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/**
+ * LLM provider: Groq (OpenAI-compatible chat completions API), swapped in
+ * from Gemini after the Gemini key pool ran out. GeminiKeyRotator is reused
+ * as-is — it's just a generic key list + rotation, provider-agnostic — only
+ * the HTTP call shape changed: Bearer auth header instead of ?key= query
+ * param, a messages[] array (system + user) instead of contents[]/parts[],
+ * and choices[0].message.content instead of candidates[0].content.parts[0].text.
+ * No thinkingConfig equivalent needed — Groq's Llama models aren't reasoning
+ * models, so they don't eat into max_tokens the way gemini-flash-latest did.
+ */
 @Service
 public class NarrativeService {
 
-    private static final String MODEL = "gemini-flash-latest";
-    private static final String API_URL_TEMPLATE =
-            "https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent?key=%s";
+    private static final String MODEL = "llama-3.3-70b-versatile"; // confirm still current on Groq's model list before deploying
+    private static final String API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
     private static final String SYSTEM_PROMPT =
             "You are a senior backend engineer reviewing diagnostic findings for one API endpoint. " +
@@ -59,13 +68,13 @@ public class NarrativeService {
 
         if (!keyRotator.hasKeys()) {
             return new EndpointNarrative(endpoint,
-                    "Narrative generation isn't configured (missing GEMINI_API_KEY).", ruleTypes);
+                    "Narrative generation isn't configured (missing GROQ_API_KEY).", ruleTypes);
         }
 
-        String fullPrompt = SYSTEM_PROMPT + "\n\n" + buildFindingsBlock(endpoint, findings);
+        String userPrompt = buildFindingsBlock(endpoint, findings);
         String requestBody;
         try {
-            requestBody = buildRequestBody(fullPrompt);
+            requestBody = buildRequestBody(SYSTEM_PROMPT, userPrompt);
         } catch (Exception e) {
             return new EndpointNarrative(endpoint,
                     "Narrative generation failed: " + e.getClass().getSimpleName(), ruleTypes);
@@ -79,12 +88,12 @@ public class NarrativeService {
         int lastStatus = -1;
 
         for (int i = 0; i < attempts; i++) {
-            String url = String.format(API_URL_TEMPLATE, keyRotator.current());
             try {
                 HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create(url))
+                        .uri(URI.create(API_URL))
                         .timeout(Duration.ofSeconds(30))
                         .header("Content-Type", "application/json")
+                        .header("Authorization", "Bearer " + keyRotator.current())
                         .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                         .build();
 
@@ -132,32 +141,32 @@ public class NarrativeService {
         return sb.toString();
     }
 
-    private String buildRequestBody(String fullPrompt) throws Exception {
+    // Builds an OpenAI-compatible chat-completions request body: a system
+    // message plus a user message, rather than Gemini's single blob of text.
+    private String buildRequestBody(String systemPrompt, String userPrompt) throws Exception {
         ObjectNode root = objectMapper.createObjectNode();
+        root.put("model", MODEL);
+        root.put("max_tokens", 2048);
+        root.put("temperature", 0.3);
 
-        ArrayNode contents = root.putArray("contents");
-        ObjectNode contentEntry = contents.addObject();
-        ArrayNode parts = contentEntry.putArray("parts");
-        ObjectNode part = parts.addObject();
-        part.put("text", fullPrompt);
-
-        ObjectNode generationConfig = root.putObject("generationConfig");
-        generationConfig.put("maxOutputTokens", 2048);
-        generationConfig.putObject("thinkingConfig").put("thinkingBudget", 0);
+        ArrayNode messages = root.putArray("messages");
+        ObjectNode systemMsg = messages.addObject();
+        systemMsg.put("role", "system");
+        systemMsg.put("content", systemPrompt);
+        ObjectNode userMsg = messages.addObject();
+        userMsg.put("role", "user");
+        userMsg.put("content", userPrompt);
 
         return objectMapper.writeValueAsString(root);
     }
 
     private String extractText(String responseBody) throws Exception {
         JsonNode root = objectMapper.readTree(responseBody);
-        JsonNode candidates = root.path("candidates");
-        if (candidates.isArray() && candidates.size() > 0) {
-            JsonNode parts = candidates.get(0).path("content").path("parts");
-            if (parts.isArray() && parts.size() > 0) {
-                String text = parts.get(0).path("text").asText();
-                if (!text.isBlank()) {
-                    return text.trim();
-                }
+        JsonNode choices = root.path("choices");
+        if (choices.isArray() && choices.size() > 0) {
+            String text = choices.get(0).path("message").path("content").asText();
+            if (!text.isBlank()) {
+                return text.trim();
             }
         }
         return "Narrative generation returned an empty response.";
