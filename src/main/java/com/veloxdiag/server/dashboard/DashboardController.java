@@ -1,6 +1,7 @@
 package com.veloxdiag.server.dashboard;
 
 import java.util.List;
+import java.util.Map;
 
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -12,9 +13,12 @@ import com.veloxdiag.server.entity.Telemetry;
 public class DashboardController {
 
     private final DashboardService dashboardService;
+    private final DashboardSummaryService dashboardSummaryService;
 
-    public DashboardController(DashboardService dashboardService) {
+    public DashboardController(DashboardService dashboardService,
+                                DashboardSummaryService dashboardSummaryService) {
         this.dashboardService = dashboardService;
+        this.dashboardSummaryService = dashboardSummaryService;
     }
 
     @GetMapping("/api/dashboard/summary")
@@ -51,5 +55,12 @@ public class DashboardController {
     @GetMapping("/api/dashboard/applications")
     public List<String> getApplications() {
         return dashboardService.getApplications();
+    }
+
+    // AI wow feature #2 — lazy-loaded on click from frontend, not auto-fetched
+    // on page load. See DashboardSummaryService for prompt/logic.
+    @GetMapping("/api/dashboard/ai-summary")
+    public Map<String, String> getAiSummary(@RequestParam(required = false) String applicationName) {
+        return dashboardSummaryService.generateSummary(applicationName);
     }
 }
