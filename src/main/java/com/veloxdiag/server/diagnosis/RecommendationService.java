@@ -271,7 +271,13 @@ public class RecommendationService {
             "in the input — keep code examples generic/illustrative if the real schema isn't known. If the " +
             "evidence is borderline or inconclusive (e.g. sample size close to the minimum, or the effect " +
             "size is small), say so once, briefly, and suggest what additional evidence would help — don't " +
-            "repeat the caveat in multiple sentences or overstate confidence either way.";
+            "repeat the caveat in multiple sentences or overstate confidence either way. " +
+            "If a 'Captured Query Evidence' section is present below, it contains the endpoint's REAL " +
+            "recently-executed SQL and its EXPLAIN plan — base your fix on it directly: name the actual " +
+            "table(s) and column(s) visible in that SQL, and reference whether it shows a sequential scan. " +
+            "Never invent a table or column name that isn't present in that captured SQL when it's given. " +
+            "If that section is absent, keep code examples clearly illustrative/generic rather than " +
+            "implying you've seen the real schema.";
 
     /**
      * On-demand, tailored version of the suggestion — mirrors NarrativeService's
@@ -311,7 +317,8 @@ public class RecommendationService {
                 "Rule type: " + finding.getRuleType() + "\n" +
                 "Severity: " + finding.getSeverity() + "\n" +
                 "Message: " + finding.getMessage() + "\n" +
-                (finding.getEvidence() != null ? "Evidence: " + finding.getEvidence() + "\n" : "");
+                (finding.getEvidence() != null ? "Evidence: " + finding.getEvidence() + "\n" : "") +
+                buildCapturedEvidenceBlock(endpoint);
 
         try {
             String result = callGroqForSuggestion(SUGGESTION_SYSTEM_PROMPT, userPrompt);
@@ -470,6 +477,38 @@ public class RecommendationService {
             return null; // non-429 failure or no more keys — fall back to template
         }
         return null;
+    }
+
+    // Pulls the most recent real captured SlowQueryPlan(s) for this endpoint —
+    // actual SQL text and EXPLAIN output — so the on-demand suggestion can
+    // reference real tables/columns instead of a generic "add a JOIN FETCH".
+    // Shared by generateAiSuggestion() for ANY finding type, not just the
+    // MISSING_INDEX_CANDIDATE path buildIndexRecommendation() already used.
+    // Returns "" (not null) so it's safe to concatenate directly into the prompt.
+    private String buildCapturedEvidenceBlock(String endpoint) {
+        List<SlowQueryPlan> plans = slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
+        if (plans == null || plans.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        int shown = 0;
+        for (SlowQueryPlan plan : plans) {
+            if (plan.getSqlText() == null || plan.getExplainPlan() == null) continue;
+            if (shown == 0) {
+                sb.append("\nCaptured Query Evidence (real SQL + EXPLAIN plan recently observed on this endpoint):\n");
+            }
+            sb.append("Query ").append(++shown).append(":\n");
+            sb.append("SQL: ").append(truncate(plan.getSqlText(), 400)).append("\n");
+            sb.append("EXPLAIN: ").append(truncate(plan.getExplainPlan(), 400)).append("\n");
+            sb.append("Contains sequential scan: ").append(plan.isContainsSeqScan()).append("\n\n");
+            if (shown >= 2) break; // cap at 2 — enough real evidence without bloating the prompt
+        }
+        return sb.toString();
+    }
+
+    private String truncate(String s, int maxLen) {
+        if (s == null) return "";
+        return s.length() > maxLen ? s.substring(0, maxLen) + "..." : s;
     }
 
     // returns [sql, why]

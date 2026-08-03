@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.veloxdiag.server.entity.SlowQueryPlan;
+import com.veloxdiag.server.repository.SlowQueryPlanRepository;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
@@ -48,14 +50,32 @@ public class NarrativeService {
             "'possible'/'suspected' finding should read as tentative; don't upgrade it to definitive " +
             "phrasing like 'the primary driver' or 'is caused by' unless the finding itself is HIGH " +
             "severity or stated as confirmed. Never let your narrative sound more certain than the " +
-            "underlying evidence, but also don't sound like a legal disclaimer.";
+            "underlying evidence, but also don't sound like a legal disclaimer. " +
+            "If a 'Captured Query Evidence' section is present below, it contains the endpoint's REAL " +
+            "recently-executed SQL and its EXPLAIN plan — use it as your primary evidence when explaining " +
+            "the root cause: name the actual table(s), whether it's a sequential scan, and roughly how " +
+            "many rows are being scanned, instead of speaking generically about 'the database'. If that " +
+            "section is absent, don't imply you've seen the query — describe the pattern from the " +
+            "aggregate numbers only.";
+
+    // New: EXPLAIN-plan-to-plain-English translator (AI wow feature #1, Slow Queries page).
+    // Low temp (0.3) — this is a factual translation, not creative prose.
+    private static final String EXPLAIN_SYSTEM_PROMPT =
+            "You translate raw SQL EXPLAIN plan output into ONE plain-English sentence. " +
+            "Audience: a developer who doesn't read EXPLAIN plans fluently. Rules: exactly one " +
+            "sentence, no preamble, no 'This query...', just the fact. Name the actual table(s) " +
+            "and whether it's a sequential scan, index scan, or index-only scan. If a sequential " +
+            "scan appears on a large/likely-large table, say so plainly (e.g. 'scans the whole " +
+            "exam_questions table'). No hedging, no markdown.";
 
     private final GeminiKeyRotator keyRotator;
+    private final SlowQueryPlanRepository slowQueryPlanRepository;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
-    public NarrativeService(GeminiKeyRotator keyRotator) {
+    public NarrativeService(GeminiKeyRotator keyRotator, SlowQueryPlanRepository slowQueryPlanRepository) {
         this.keyRotator = keyRotator;
+        this.slowQueryPlanRepository = slowQueryPlanRepository;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
@@ -73,62 +93,34 @@ public class NarrativeService {
                     ruleTypes);
         }
 
-        if (!keyRotator.hasKeys()) {
-            return new EndpointNarrative(endpoint,
-                    "Narrative generation isn't configured (missing GROQ_API_KEY).", ruleTypes);
-        }
-
         String userPrompt = buildFindingsBlock(endpoint, findings);
-        String requestBody;
         try {
-            requestBody = buildRequestBody(SYSTEM_PROMPT, userPrompt);
+            String text = callGroq(SYSTEM_PROMPT, userPrompt, 0.7);
+            return new EndpointNarrative(endpoint, text, ruleTypes);
         } catch (Exception e) {
-            return new EndpointNarrative(endpoint,
-                    "Narrative generation failed: " + e.getClass().getSimpleName(), ruleTypes);
+            String msg = e instanceof IllegalStateException
+                    ? "Narrative generation isn't configured (missing GROQ_API_KEY)."
+                    : "Narrative generation failed: " + e.getMessage();
+            return new EndpointNarrative(endpoint, msg, ruleTypes);
+        }
+    }
+
+    // New: AI wow feature #1 — plain-English EXPLAIN plan summary for Slow Queries page.
+    // Reuses callGroq/keyRotator infra below. Called on-demand (button click), not bulk.
+    public String explainPlanInPlainEnglish(SlowQueryPlan plan) {
+        if (plan == null || plan.getExplainPlan() == null || plan.getExplainPlan().isBlank()) {
+            return "No EXPLAIN output captured for this query.";
         }
 
-        // Try once per available key. Stops at first non-429 outcome (success or a
-        // real error), only advances on 429 so quota exhaustion doesn't burn through
-        // keys pointlessly for unrelated failures.
-        int attempts = Math.max(1, keyRotator.keyCount());
-        String lastFailureBody = null;
-        int lastStatus = -1;
+        String userPrompt = "SQL:\n" + truncate(plan.getSqlText(), 400) +
+                "\n\nEXPLAIN output:\n" + truncate(plan.getExplainPlan(), 400) +
+                "\n\nSequential scan flag: " + plan.isContainsSeqScan();
 
-        for (int i = 0; i < attempts; i++) {
-            try {
-                HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create(API_URL))
-                        .timeout(Duration.ofSeconds(30))
-                        .header("Content-Type", "application/json")
-                        .header("Authorization", "Bearer " + keyRotator.current())
-                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                        .build();
-
-                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-                if (response.statusCode() == 200) {
-                    String text = extractText(response.body());
-                    return new EndpointNarrative(endpoint, text, ruleTypes);
-                }
-
-                lastStatus = response.statusCode();
-                lastFailureBody = response.body();
-
-                if (response.statusCode() == 429 && keyRotator.rotate()) {
-                    continue; // try next key
-                }
-                break; // non-429 failure, or no more keys to rotate to
-            } catch (Exception e) {
-                return new EndpointNarrative(endpoint,
-                        "Narrative generation failed: " + e.getClass().getSimpleName(), ruleTypes);
-            }
+        try {
+            return callGroq(EXPLAIN_SYSTEM_PROMPT, userPrompt, 0.3).trim();
+        } catch (Exception e) {
+            return "Couldn't generate explanation (" + e.getClass().getSimpleName() + ").";
         }
-
-        String truncated = lastFailureBody != null && lastFailureBody.length() > 300
-                ? lastFailureBody.substring(0, 300) : lastFailureBody;
-        return new EndpointNarrative(endpoint,
-                "Narrative generation failed (status " + lastStatus + "): " + truncated,
-                ruleTypes);
     }
 
     private String buildFindingsBlock(String endpoint, List<DiagnosisFinding> findings) {
@@ -145,16 +137,53 @@ public class NarrativeService {
             }
             sb.append("\n");
         }
+
+        String capturedEvidence = buildCapturedEvidenceBlock(endpoint);
+        if (capturedEvidence != null) {
+            sb.append("\nCaptured Query Evidence (real SQL + EXPLAIN plan recently observed on this endpoint):\n");
+            sb.append(capturedEvidence);
+        }
+
         return sb.toString();
+    }
+
+    // Pulls the most recent real captured SlowQueryPlan(s) for this endpoint —
+    // actual SQL text and EXPLAIN output — so the narrative can name real
+    // tables/columns instead of speaking generically. Same repository/pattern
+    // RecommendationService already used for MISSING_INDEX_CANDIDATE, now
+    // shared here for ANY finding type on the endpoint. Returns null if no
+    // plan has been captured yet — narrative falls back to aggregate numbers.
+    private String buildCapturedEvidenceBlock(String endpoint) {
+        List<SlowQueryPlan> plans = slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
+        if (plans == null || plans.isEmpty()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        int shown = 0;
+        for (SlowQueryPlan plan : plans) {
+            if (plan.getSqlText() == null || plan.getExplainPlan() == null) continue;
+            sb.append("Query ").append(++shown).append(":\n");
+            sb.append("SQL: ").append(truncate(plan.getSqlText(), 400)).append("\n");
+            sb.append("EXPLAIN: ").append(truncate(plan.getExplainPlan(), 400)).append("\n");
+            sb.append("Contains sequential scan: ").append(plan.isContainsSeqScan()).append("\n\n");
+            if (shown >= 2) break; // cap at 2 — enough real evidence without bloating the prompt
+        }
+        return shown > 0 ? sb.toString() : null;
+    }
+
+    private String truncate(String s, int maxLen) {
+        if (s == null) return "";
+        return s.length() > maxLen ? s.substring(0, maxLen) + "..." : s;
     }
 
     // Builds an OpenAI-compatible chat-completions request body: a system
     // message plus a user message, rather than Gemini's single blob of text.
-    private String buildRequestBody(String systemPrompt, String userPrompt) throws Exception {
+    // temperature is now a param — narrative prose uses 0.7, EXPLAIN-summary uses 0.3.
+    private String buildRequestBody(String systemPrompt, String userPrompt, double temperature) throws Exception {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", MODEL);
         root.put("max_tokens", 2048);
-        root.put("temperature", 0.7);
+        root.put("temperature", temperature);
 
         ArrayNode messages = root.putArray("messages");
         ObjectNode systemMsg = messages.addObject();
@@ -165,6 +194,49 @@ public class NarrativeService {
         userMsg.put("content", userPrompt);
 
         return objectMapper.writeValueAsString(root);
+    }
+
+    // Shared Groq call w/ key rotation, used by both generateNarrative and
+    // explainPlanInPlainEnglish. Tries once per available key, only advances
+    // on 429 (quota) so unrelated failures don't burn through keys pointlessly.
+    // Throws on total failure — caller decides fallback text.
+    private String callGroq(String systemPrompt, String userPrompt, double temperature) throws Exception {
+        if (!keyRotator.hasKeys()) {
+            throw new IllegalStateException("missing GROQ_API_KEY");
+        }
+        String requestBody = buildRequestBody(systemPrompt, userPrompt, temperature);
+
+        int attempts = Math.max(1, keyRotator.keyCount());
+        String lastFailureBody = null;
+        int lastStatus = -1;
+
+        for (int i = 0; i < attempts; i++) {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(API_URL))
+                    .timeout(Duration.ofSeconds(30))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer " + keyRotator.current())
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() == 200) {
+                return extractText(response.body());
+            }
+
+            lastStatus = response.statusCode();
+            lastFailureBody = response.body();
+
+            if (response.statusCode() == 429 && keyRotator.rotate()) {
+                continue; // try next key
+            }
+            break; // non-429 failure, or no more keys to rotate to
+        }
+
+        String truncated = lastFailureBody != null && lastFailureBody.length() > 300
+                ? lastFailureBody.substring(0, 300) : lastFailureBody;
+        throw new RuntimeException("status " + lastStatus + ": " + truncated);
     }
 
     private String extractText(String responseBody) throws Exception {
