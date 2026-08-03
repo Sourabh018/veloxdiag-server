@@ -1,5 +1,6 @@
 package com.veloxdiag.server.controller;
 
+import com.veloxdiag.server.diagnosis.NarrativeService;
 import com.veloxdiag.server.entity.SlowQueryPlan;
 import com.veloxdiag.server.repository.SlowQueryPlanRepository;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -7,6 +8,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 @RestController
@@ -22,6 +24,12 @@ public class SlowQueryPlanController {
 
     @Autowired
     private SlowQueryPlanRepository slowQueryPlanRepository;
+
+    // AI wow feature #1: plain-English EXPLAIN summary. NarrativeService
+    // already has explainPlanInPlainEnglish() + the Groq call infra — this
+    // controller just wires a lookup-by-id in front of it.
+    @Autowired
+    private NarrativeService narrativeService;
 
     // Ingestion endpoint — receives one captured EXPLAIN plan per slow
     // SELECT statement from veloxdiag-starter's SlowQueryExplainCapture
@@ -54,6 +62,20 @@ public class SlowQueryPlanController {
     @GetMapping
     public List<SlowQueryPlan> getRecentPlans(@RequestParam String endpoint) {
         return slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
+    }
+
+    // AI wow feature #1 (Slow Queries page): on-demand, one plan at a time —
+    // not bulk — so a page with many captured plans doesn't fire N Groq
+    // calls on load. Returns 404-shaped null body if the id doesn't exist
+    // rather than throwing, since a stale frontend id (plan deleted via
+    // Settings reset) shouldn't 500.
+    @GetMapping("/{id}/explain")
+    public Map<String, String> explainPlan(@PathVariable Long id) {
+        SlowQueryPlan plan = slowQueryPlanRepository.findById(id).orElse(null);
+        if (plan == null) {
+            return Map.of("explanation", "Query plan not found — it may have been cleared by a reset.");
+        }
+        return Map.of("explanation", narrativeService.explainPlanInPlainEnglish(plan));
     }
 
     // Server-side mirror of veloxdiag-starter's SlowQueryPlanRequest — field
