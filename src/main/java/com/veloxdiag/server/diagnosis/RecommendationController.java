@@ -36,15 +36,4 @@ public class RecommendationController {
                                                              @RequestParam String ruleType) {
         return recommendationService.generateAiSuggestion(endpoint, ruleType);
     }
-
-    // AI wow feature #3 — ready-to-paste migration script + commit message.
-    // Only meaningful for MISSING_INDEX_CANDIDATE (the only finding type with
-    // a real captured SQL/EXPLAIN plan to generate a migration from); the
-    // service itself gates this and returns a clear unavailableReason for
-    // any other ruleType rather than the controller pre-filtering silently.
-    @GetMapping("/migration")
-    public MigrationScriptResult getMigrationScript(@RequestParam String endpoint,
-                                                      @RequestParam String ruleType) {
-        return recommendationService.generateMigrationScript(endpoint, ruleType);
-    }
 }
