@@ -25,8 +25,6 @@ public interface TelemetryRepository extends JpaRepository<Telemetry, Long> {
     @Query("SELECT COUNT(DISTINCT t.applicationName) FROM Telemetry t")
     long getConnectedApplications();
 
-    // Combines the 4 queries above into 1 — used by getSummary() to avoid firing
-    // 4 separate round-trips on every dashboard poll.
     @Query("SELECT COUNT(t) as totalRequests, " +
            "AVG(t.durationMs) as averageResponseTime, " +
            "SUM(CASE WHEN t.status >= 400 THEN 1 ELSE 0 END) as errorRequests, " +
@@ -34,8 +32,6 @@ public interface TelemetryRepository extends JpaRepository<Telemetry, Long> {
            "FROM Telemetry t")
     SummaryProjection getSummaryStats();
 
-    // Same as getSummaryStats() but scoped to one application — used when the
-    // dashboard's app selector has a specific app chosen instead of "All Apps".
     @Query("SELECT COUNT(t) as totalRequests, " +
            "AVG(t.durationMs) as averageResponseTime, " +
            "SUM(CASE WHEN t.status >= 400 THEN 1 ELSE 0 END) as errorRequests, " +
@@ -43,24 +39,17 @@ public interface TelemetryRepository extends JpaRepository<Telemetry, Long> {
            "FROM Telemetry t WHERE t.applicationName = :applicationName")
     SummaryProjection getSummaryStatsByApplication(String applicationName);
 
-    // Distinct app names seen in telemetry — populates the app-selector dropdown.
     @Query("SELECT DISTINCT t.applicationName FROM Telemetry t ORDER BY t.applicationName")
     List<String> findDistinctApplicationNames();
 
-    // recent requests, most recent first, capped by Pageable limit
     List<Telemetry> findAllByOrderByTimestampDesc(Pageable pageable);
 
-    // same as above, scoped to one application
     List<Telemetry> findByApplicationNameOrderByTimestampDesc(String applicationName, Pageable pageable);
 
-    // error requests, most recent first, capped by Pageable limit
     List<Telemetry> findByStatusGreaterThanEqualOrderByTimestampDesc(Integer status, Pageable pageable);
 
-    // same as above, scoped to one application
     List<Telemetry> findByApplicationNameAndStatusGreaterThanEqualOrderByTimestampDesc(String applicationName, Integer status, Pageable pageable);
 
-    // hourly trend buckets, last N hours (native query, MySQL syntax). applicationName
-    // is nullable — passing null matches all applications (the "All Apps" view).
     @Query(value = "SELECT DATE_FORMAT(timestamp, '%Y-%m-%d %H:00:00') as bucket, " +
             "COUNT(*) as requestCount, AVG(duration_ms) as avgDuration, " +
             "SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) as errorCount " +
@@ -77,10 +66,17 @@ public interface TelemetryRepository extends JpaRepository<Telemetry, Long> {
     // Diagnosis/Query Analyzer/Index Advisor to a single app instead of "All Apps"
     List<Telemetry> findByApplicationNameAndTimestampAfter(String applicationName, LocalDateTime timestamp);
 
-    // Deletes every telemetry row for one application — used by the Settings page's
-    // "Reset [App] Data" button. Scoped to a single app deliberately: a reset for
-    // AgroMart must never touch CET_CELL's data and vice versa. @Modifying+@Transactional
-    // are required for JPQL DELETE/UPDATE queries to execute (plain @Query alone won't).
+    // Historical baseline window — everything between two timestamps, not just
+    // "after one." Used by DiagnosisService's PERFORMANCE_REGRESSION check to
+    // pull an endpoint's prior history (e.g. the 14 days before the current
+    // lookback window) separately from the current window itself, so "is this
+    // endpoint currently worse than its own normal" can be measured instead of
+    // just "is this endpoint above one fixed number."
+    List<Telemetry> findByTimestampBetween(LocalDateTime start, LocalDateTime end);
+
+    // same as above, scoped to one application
+    List<Telemetry> findByApplicationNameAndTimestampBetween(String applicationName, LocalDateTime start, LocalDateTime end);
+
     @Modifying
     @Transactional
     @Query("DELETE FROM Telemetry t WHERE t.applicationName = :applicationName")

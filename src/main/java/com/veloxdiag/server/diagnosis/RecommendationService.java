@@ -142,6 +142,7 @@ public class RecommendationService {
             case "HIGH_ERROR_RATE":
             case "SERVER_ERROR":
             case "ROOT_CAUSE_CORRELATION":
+            case "PERFORMANCE_REGRESSION":
                 return null;
 
             default:

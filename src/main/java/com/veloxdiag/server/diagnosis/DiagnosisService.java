@@ -48,6 +48,17 @@ public class DiagnosisService {
 
     private static final long MIN_SAMPLE_COUNT = 6;
 
+    // Baseline window for PERFORMANCE_REGRESSION: how far back to look for an
+    // endpoint's own historical normal, and how many samples that history
+    // needs before we trust it enough to compute a baseline from it at all.
+    // Deliberately higher than MIN_SAMPLE_COUNT (6) — a baseline is a claim
+    // about "normal," not just "enough to mention," so it earns a stricter bar.
+    private static final long BASELINE_LOOKBACK_DAYS = 2;
+    private static final long MIN_BASELINE_SAMPLE_COUNT = 15;
+    // z-score above which current performance is flagged as a regression
+    // relative to the endpoint's own baseline (not a global constant).
+    private static final double REGRESSION_Z_SCORE_THRESHOLD = 2.0;
+
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
     private final RuleEngineService ruleEngineService;
@@ -148,6 +159,17 @@ public class DiagnosisService {
         Map<String, List<Telemetry>> byEndpoint = allTelemetry.stream()
                 .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
 
+        // Baseline window: the BASELINE_LOOKBACK_DAYS immediately before the
+        // current lookback window starts — i.e. this endpoint's own recent
+        // history, kept separate from the window being diagnosed so "current"
+        // and "normal" are never the same data compared against itself.
+        LocalDateTime baselineStart = cutoff.minusDays(BASELINE_LOOKBACK_DAYS);
+        List<Telemetry> baselineTelemetry = (applicationName == null || applicationName.isBlank())
+                ? telemetryRepository.findByTimestampBetween(baselineStart, cutoff)
+                : telemetryRepository.findByApplicationNameAndTimestampBetween(applicationName, baselineStart, cutoff);
+        Map<String, List<Telemetry>> baselineByEndpoint = baselineTelemetry.stream()
+                .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
+
         List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules =
                 ruleEngineService.loadEnabledRules();
 
@@ -158,17 +180,19 @@ public class DiagnosisService {
         for (Map.Entry<String, List<Telemetry>> entry : byEndpoint.entrySet()) {
             String endpoint = entry.getKey();
             List<SlowQueryPlan> plansForEndpoint = plansByEndpoint.getOrDefault(endpoint, List.of());
-            findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, rules, thresholds));
+            List<Telemetry> baselineForEndpoint = baselineByEndpoint.getOrDefault(endpoint, List.of());
+            findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, baselineForEndpoint, rules, thresholds));
         }
 
         return findings;
     }
 
     // Batched path — used by runDiagnosis, takes pre-fetched rules, pre-fetched
-    // (already endpoint-filtered) seq-scan plans, and the resolved thresholds
-    // for the application being diagnosed.
+    // (already endpoint-filtered) seq-scan plans, pre-fetched baseline-window
+    // telemetry for this endpoint, and the resolved thresholds for the
+    // application being diagnosed.
     private List<DiagnosisFinding> computeEndpointFindings(
-            String endpoint, List<Telemetry> records, List<SlowQueryPlan> seqScanPlans,
+            String endpoint, List<Telemetry> records, List<SlowQueryPlan> seqScanPlans, List<Telemetry> baselineRecords,
             List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules, Thresholds thresholds) {
         List<DiagnosisFinding> endpointFindings = new ArrayList<>();
         endpointFindings.addAll(checkSlowRequest(endpoint, records, thresholds));
@@ -176,6 +200,7 @@ public class DiagnosisService {
         endpointFindings.addAll(checkServerErrors(endpoint, records, thresholds));
         endpointFindings.addAll(checkPossibleNPlusOne(endpoint, records, thresholds));
         endpointFindings.addAll(checkMissingIndexCandidateFromPlans(endpoint, seqScanPlans, thresholds));
+        endpointFindings.addAll(checkPerformanceRegression(endpoint, records, baselineRecords));
 
         List<DiagnosisFinding> combined = new ArrayList<>(endpointFindings);
         combined.addAll(correlateFindings(endpoint, records, endpointFindings, thresholds));
@@ -187,20 +212,25 @@ public class DiagnosisService {
     // Unbatched path — used only by getFindingsForEndpoint, which evaluates a
     // single endpoint on demand (e.g. the "Explain this" narrative fetch). This
     // path has no application context (endpoint names are looked up without
-    // knowing which app they belong to), so it uses the DEFAULT_KEY thresholds.
-    // Known limitation: if the same endpoint name exists in two different apps
-    // with different tuned thresholds, this path won't pick the right one —
-    // narrow gap, only affects the single-endpoint narrative/explain feature,
-    // not the main Diagnosis/Dashboard/Index Advisor views.
+    // knowing which app they belong to), so it uses the DEFAULT_KEY thresholds
+    // and an all-apps baseline window — same narrow gap noted below, now also
+    // applying to the baseline: if the same endpoint name exists in two apps,
+    // their history gets pooled here instead of kept separate.
     private List<DiagnosisFinding> computeEndpointFindings(String endpoint, List<Telemetry> records,
                                                              LocalDateTime cutoff) {
         Thresholds thresholds = resolveThresholds(null);
+        LocalDateTime baselineStart = cutoff.minusDays(BASELINE_LOOKBACK_DAYS);
+        List<Telemetry> baselineRecords = telemetryRepository.findByTimestampBetween(baselineStart, cutoff).stream()
+                .filter(t -> endpoint.equals(EndpointNormalizer.normalize(t.getEndpoint())))
+                .collect(Collectors.toList());
+
         List<DiagnosisFinding> endpointFindings = new ArrayList<>();
         endpointFindings.addAll(checkSlowRequest(endpoint, records, thresholds));
         endpointFindings.addAll(checkHighErrorRate(endpoint, records, thresholds));
         endpointFindings.addAll(checkServerErrors(endpoint, records, thresholds));
         endpointFindings.addAll(checkPossibleNPlusOne(endpoint, records, thresholds));
         endpointFindings.addAll(checkMissingIndexCandidate(endpoint, cutoff, thresholds));
+        endpointFindings.addAll(checkPerformanceRegression(endpoint, records, baselineRecords));
 
         List<DiagnosisFinding> combined = new ArrayList<>(endpointFindings);
         combined.addAll(correlateFindings(endpoint, records, endpointFindings, thresholds));
@@ -218,11 +248,23 @@ public class DiagnosisService {
         return computeEndpointFindings(endpoint, records, cutoff);
     }
 
+    // Population standard deviation of a set of durations, given their mean.
+    // Used to turn "is this endpoint slow" from a flat yes/no against one global
+    // number into "how *consistently* slow is it" — a tight cluster around a
+    // high mean is a real systemic pattern; a high mean caused by one or two
+    // outliers among mostly-fast requests is noise, and should be flagged with
+    // lower confidence even if it crosses the same threshold.
+    private static double stdDev(List<Long> values, double mean) {
+        if (values.size() < 2) return 0.0;
+        double sumSquaredDiff = values.stream()
+                .mapToDouble(v -> Math.pow(v - mean, 2))
+                .sum();
+        return Math.sqrt(sumSquaredDiff / values.size());
+    }
+
     private List<DiagnosisFinding> checkSlowRequest(String endpoint, List<Telemetry> records, Thresholds thresholds) {
-        double avgDuration = records.stream()
-                .mapToLong(Telemetry::getDurationMs)
-                .average()
-                .orElse(0.0);
+        List<Long> durations = records.stream().map(Telemetry::getDurationMs).collect(Collectors.toList());
+        double avgDuration = durations.stream().mapToLong(Long::longValue).average().orElse(0.0);
 
         if (avgDuration > thresholds.slowRequestThresholdMs) {
             boolean insufficientSamples = records.size() < MIN_SAMPLE_COUNT;
@@ -230,22 +272,132 @@ public class DiagnosisService {
                     ? "LOW"
                     : (avgDuration > 5000 ? "HIGH" : (avgDuration > 2000 ? "MEDIUM" : "LOW"));
 
+            double stdDeviation = stdDev(durations, avgDuration);
+            // Coefficient of variation — stddev relative to the mean. Low CV means
+            // requests are consistently slow together (a real pattern); high CV
+            // means the average is being dragged up by a few spikes among mostly
+            // normal requests (weaker evidence of a systemic issue).
+            double coefficientOfVariation = avgDuration > 0 ? stdDeviation / avgDuration : 0.0;
+
+            String confidence;
+            if (insufficientSamples) {
+                confidence = "LOW";
+            } else if (coefficientOfVariation < 0.3) {
+                confidence = "HIGH";
+            } else if (coefficientOfVariation < 0.6) {
+                confidence = "MEDIUM";
+            } else {
+                confidence = "LOW";
+            }
+
+            String conditionMatched = String.format(
+                    "avgDurationMs(%.0f) > slowRequestThresholdMs(%.0f), sampleCount(%d) >= minSampleCount(%d): %s",
+                    avgDuration, thresholds.slowRequestThresholdMs, records.size(), MIN_SAMPLE_COUNT, !insufficientSamples);
+
             Map<String, Object> evidence = new HashMap<>();
             evidence.put("averageDurationMs", avgDuration);
+            evidence.put("stdDeviationMs", stdDeviation);
+            evidence.put("coefficientOfVariation", coefficientOfVariation);
             evidence.put("sampleCount", records.size());
             evidence.put("insufficientSampleSize", insufficientSamples);
+            evidence.put("conditionMatched", conditionMatched);
 
             String message = insufficientSamples
                     ? String.format("Endpoint %s is averaging %.0fms per request, above the %.0fms threshold — " +
                                     "but this is based on only %d sample(s), too few to reliably call this a systemic " +
                                     "slowdown rather than a one-off (e.g. cold start).",
                             endpoint, avgDuration, thresholds.slowRequestThresholdMs, records.size())
-                    : String.format("Endpoint %s is averaging %.0fms per request, above the %.0fms threshold.",
-                            endpoint, avgDuration, thresholds.slowRequestThresholdMs);
+                    : String.format("Endpoint %s is averaging %.0fms per request (\u00b1%.0fms, CV %.2f), above the %.0fms " +
+                                    "threshold. %s",
+                            endpoint, avgDuration, stdDeviation, coefficientOfVariation, thresholds.slowRequestThresholdMs,
+                            coefficientOfVariation < 0.3
+                                    ? "Requests are consistently slow together — this looks like a systemic pattern, not an outlier."
+                                    : "Duration varies a lot between requests — the average may be driven by a few spikes rather than a consistent slowdown.");
 
-            return List.of(new DiagnosisFinding("SLOW_REQUEST", severity, endpoint, message, evidence));
+            return List.of(new DiagnosisFinding("SLOW_REQUEST", severity, endpoint, message, evidence, confidence, List.of()));
         }
         return List.of();
+    }
+
+    // Statistical anomaly detection against the endpoint's OWN history — the
+    // piece that separates this from a flat-threshold system. Instead of
+    // asking "is this endpoint above one global number," this asks "is this
+    // endpoint currently behaving differently than IT normally does."
+    //
+    // Deliberately conservative: requires MIN_BASELINE_SAMPLE_COUNT samples of
+    // real history before computing anything. If an endpoint is new or hasn't
+    // accumulated enough telemetry yet, this returns no finding rather than
+    // fabricating a baseline from a handful of points — a thin, noisy baseline
+    // is worse than no baseline, since it would produce false confidence.
+    //
+    // Only flags REGRESSIONS (current worse than baseline), not improvements —
+    // an endpoint getting faster than its baseline is not a diagnosis finding.
+    private List<DiagnosisFinding> checkPerformanceRegression(String endpoint, List<Telemetry> currentRecords,
+                                                                 List<Telemetry> baselineRecords) {
+        List<Long> baselineDurations = baselineRecords.stream().map(Telemetry::getDurationMs).collect(Collectors.toList());
+
+        if (baselineDurations.size() < MIN_BASELINE_SAMPLE_COUNT || currentRecords.isEmpty()) {
+            return List.of();
+        }
+
+        double baselineMean = baselineDurations.stream().mapToLong(Long::longValue).average().orElse(0.0);
+        double baselineStdDeviation = stdDev(baselineDurations, baselineMean);
+
+        double currentMean = currentRecords.stream()
+                .mapToLong(Telemetry::getDurationMs)
+                .average()
+                .orElse(0.0);
+
+        // Guard against a near-flat baseline (stddev ~0) producing an absurd
+        // z-score off a tiny denominator — fall back to a simple ratio check
+        // in that case instead of dividing by (near) zero.
+        boolean flatBaseline = baselineStdDeviation < 1.0;
+        double zScore = flatBaseline ? 0.0 : (currentMean - baselineMean) / baselineStdDeviation;
+        double ratio = baselineMean > 0 ? currentMean / baselineMean : 0.0;
+
+        boolean isRegression = flatBaseline
+                ? ratio >= 1.5 && (currentMean - baselineMean) > 50 // at least 50ms of real, not rounding-noise, drift
+                : zScore >= REGRESSION_Z_SCORE_THRESHOLD;
+
+        if (!isRegression) {
+            return List.of();
+        }
+
+        String severity;
+        if (flatBaseline) {
+            severity = ratio >= 3.0 ? "HIGH" : (ratio >= 2.0 ? "MEDIUM" : "LOW");
+        } else {
+            severity = zScore >= 4.0 ? "HIGH" : (zScore >= 3.0 ? "MEDIUM" : "LOW");
+        }
+
+        String confidence = baselineDurations.size() >= 50 ? "HIGH" : "MEDIUM";
+
+        String conditionMatched = flatBaseline
+                ? String.format("currentMeanMs(%.0f) / baselineMeanMs(%.0f) = %.2fx >= 1.5x, baselineSampleCount(%d)",
+                        currentMean, baselineMean, ratio, baselineDurations.size())
+                : String.format("zScore(%.2f) = (currentMeanMs(%.0f) - baselineMeanMs(%.0f)) / baselineStdDevMs(%.0f) >= %.1f, baselineSampleCount(%d)",
+                        zScore, currentMean, baselineMean, baselineStdDeviation, REGRESSION_Z_SCORE_THRESHOLD, baselineDurations.size());
+
+        Map<String, Object> evidence = new HashMap<>();
+        evidence.put("currentMeanMs", currentMean);
+        evidence.put("currentSampleCount", currentRecords.size());
+        evidence.put("baselineMeanMs", baselineMean);
+        evidence.put("baselineStdDeviationMs", baselineStdDeviation);
+        evidence.put("baselineSampleCount", baselineDurations.size());
+        evidence.put("baselineWindowDays", BASELINE_LOOKBACK_DAYS);
+        evidence.put("zScore", zScore);
+        evidence.put("conditionMatched", conditionMatched);
+
+        String message = String.format(
+                "Endpoint %s is currently averaging %.0fms, which is a real regression against its own %d-day baseline " +
+                        "of %.0fms (\u00b1%.0fms, n=%d) — %s. This is a change relative to how this specific endpoint normally " +
+                        "behaves, not just a comparison against a fixed threshold.",
+                endpoint, currentMean, BASELINE_LOOKBACK_DAYS, baselineMean, baselineStdDeviation, baselineDurations.size(),
+                flatBaseline
+                        ? String.format("%.1fx slower than baseline", ratio)
+                        : String.format("%.1f standard deviations above baseline", zScore));
+
+        return List.of(new DiagnosisFinding("PERFORMANCE_REGRESSION", severity, endpoint, message, evidence, confidence, List.of()));
     }
 
     private List<DiagnosisFinding> checkHighErrorRate(String endpoint, List<Telemetry> records, Thresholds thresholds) {
@@ -311,11 +463,38 @@ public class DiagnosisService {
                     ? "LOW"
                     : (maxQueryCount > 50 ? "HIGH" : (maxQueryCount > 25 ? "MEDIUM" : "LOW"));
 
+            double stdDeviation = stdDev(counts, avgQueryCount);
+            // How many of the observed requests actually crossed the threshold, not
+            // just the single max — a pattern that recurs across most requests is
+            // stronger evidence than one spike among otherwise-normal counts.
+            long overThresholdCount = counts.stream()
+                    .filter(c -> c > thresholds.possibleNPlusOneQueryThreshold)
+                    .count();
+            double recurrenceRate = counts.isEmpty() ? 0.0 : (double) overThresholdCount / counts.size();
+
+            String confidence;
+            if (insufficientSamples) {
+                confidence = "LOW";
+            } else if (recurrenceRate >= 0.7) {
+                confidence = "HIGH";
+            } else if (recurrenceRate >= 0.3) {
+                confidence = "MEDIUM";
+            } else {
+                confidence = "LOW";
+            }
+
+            String conditionMatched = String.format(
+                    "maxQueryCount(%d) > nPlusOneThreshold(%d), recurring in %d/%d requests (%.0f%%)",
+                    maxQueryCount, thresholds.possibleNPlusOneQueryThreshold, overThresholdCount, counts.size(), recurrenceRate * 100);
+
             Map<String, Object> evidence = new HashMap<>();
             evidence.put("averageQueryCount", avgQueryCount);
             evidence.put("maxQueryCount", maxQueryCount);
+            evidence.put("stdDeviationQueryCount", stdDeviation);
+            evidence.put("recurrenceRate", recurrenceRate);
             evidence.put("sampleCount", counts.size());
             evidence.put("insufficientSampleSize", insufficientSamples);
+            evidence.put("conditionMatched", conditionMatched);
 
             String message = insufficientSamples
                     ? String.format("Endpoint %s spiked to %d SQL queries in at least one request (average %.1f), " +
@@ -323,10 +502,11 @@ public class DiagnosisService {
                                     "observed, too few to confirm this is a recurring pattern rather than a single event.",
                             endpoint, maxQueryCount, avgQueryCount, counts.size())
                     : String.format("Endpoint %s spiked to %d SQL queries in at least one request (average %.1f across %d samples), " +
-                                    "suggesting an N+1 query pattern rather than a single efficient fetch.",
-                            endpoint, maxQueryCount, avgQueryCount, counts.size());
+                                    "recurring in %.0f%% of observed requests — suggesting an N+1 query pattern rather than a single " +
+                                    "efficient fetch.",
+                            endpoint, maxQueryCount, avgQueryCount, counts.size(), recurrenceRate * 100);
 
-            return List.of(new DiagnosisFinding("POSSIBLE_N_PLUS_ONE", severity, endpoint, message, evidence));
+            return List.of(new DiagnosisFinding("POSSIBLE_N_PLUS_ONE", severity, endpoint, message, evidence, confidence, List.of()));
         }
         return List.of();
     }
