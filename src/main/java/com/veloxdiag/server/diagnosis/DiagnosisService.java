@@ -19,14 +19,6 @@ public class DiagnosisService {
 
     static final String DEFAULT_KEY = "__default__";
 
-    /**
-     * Immutable snapshot of the five rule thresholds for one evaluation run.
-     * Resolved once per runDiagnosis(applicationName) call and threaded through
-     * every private check method as a parameter, instead of each method reading
-     * a shared mutable instance field directly — that's what makes per-application
-     * thresholds possible without a data race between concurrent requests for
-     * different applications.
-     */
     private static class Thresholds {
         final double slowRequestThresholdMs;
         final long highErrorRateThreshold;
@@ -83,8 +75,6 @@ public class DiagnosisService {
         return thresholdsByApp.getOrDefault(resolveKey(applicationName), thresholdsByApp.get(DEFAULT_KEY));
     }
 
-    // ---- Per-application threshold getters/setters, used by SettingsController ----
-
     public double getSlowRequestThresholdMs(String applicationName) { return resolveThresholds(applicationName).slowRequestThresholdMs; }
     public long getHighErrorRateThreshold(String applicationName) { return resolveThresholds(applicationName).highErrorRateThreshold; }
     public int getServerErrorStatusThreshold(String applicationName) { return resolveThresholds(applicationName).serverErrorStatusThreshold; }
@@ -98,11 +88,6 @@ public class DiagnosisService {
                 possibleNPlusOneQueryThreshold, seqScanRowThreshold
         ));
     }
-
-    // ---- No-arg / single-value overloads, operating on the DEFAULT_KEY bucket ----
-    // Kept for any caller not yet passing an applicationName (e.g. buildDefaultFor
-    // seed values in SettingsController, or the single-endpoint narrative lookup
-    // path which has no application context — see getFindingsForEndpoint below).
 
     public double getSlowRequestThresholdMs() { return getSlowRequestThresholdMs(null); }
     public void setSlowRequestThresholdMs(double value) {
@@ -138,14 +123,6 @@ public class DiagnosisService {
         return runDiagnosis(null);
     }
 
-    // App-selector-scoped version. Blank/null applicationName means "All Apps" —
-    // same combined behavior as runDiagnosis() above. Filtering happens before
-    // grouping by endpoint so cross-app endpoint-name collisions (unlikely, but
-    // possible) can't mix findings from two different applications together.
-    // Thresholds are now resolved once here for the specific application being
-    // diagnosed (falling back to DEFAULT_KEY for "All Apps"), instead of reading
-    // one shared mutable field — this is what makes per-app threshold tuning
-    // actually affect evaluation results, not just the Settings page display.
     public List<DiagnosisFinding> runDiagnosis(String applicationName) {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays(applicationName));
         Thresholds thresholds = resolveThresholds(applicationName);
@@ -173,9 +150,6 @@ public class DiagnosisService {
         return findings;
     }
 
-    // Batched path — used by runDiagnosis, takes pre-fetched rules, pre-fetched
-    // (already endpoint-filtered) seq-scan plans, and the resolved thresholds
-    // for the application being diagnosed.
     private List<DiagnosisFinding> computeEndpointFindings(
             String endpoint, List<Telemetry> records, List<SlowQueryPlan> seqScanPlans,
             List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules, Thresholds thresholds) {
@@ -194,14 +168,6 @@ public class DiagnosisService {
         return combined;
     }
 
-    // Unbatched path — used only by getFindingsForEndpoint, which evaluates a
-    // single endpoint on demand (e.g. the "Explain this" narrative fetch). This
-    // path has no application context (endpoint names are looked up without
-    // knowing which app they belong to), so it uses the DEFAULT_KEY thresholds.
-    // Known limitation: if the same endpoint name exists in two different apps
-    // with different tuned thresholds, this path won't pick the right one —
-    // narrow gap, only affects the single-endpoint narrative/explain feature,
-    // not the main Diagnosis/Dashboard/Index Advisor views.
     private List<DiagnosisFinding> computeEndpointFindings(String endpoint, List<Telemetry> records,
                                                              LocalDateTime cutoff) {
         Thresholds thresholds = resolveThresholds(null);
@@ -229,12 +195,6 @@ public class DiagnosisService {
         return computeEndpointFindings(endpoint, records, cutoff);
     }
 
-    // Population standard deviation of a set of durations, given their mean.
-    // Used to turn "is this endpoint slow" from a flat yes/no against one global
-    // number into "how *consistently* slow is it" — a tight cluster around a
-    // high mean is a real systemic pattern; a high mean caused by one or two
-    // outliers among mostly-fast requests is noise, and should be flagged with
-    // lower confidence even if it crosses the same threshold.
     private static double stdDev(List<Long> values, double mean) {
         if (values.size() < 2) return 0.0;
         double sumSquaredDiff = values.stream()
@@ -254,10 +214,6 @@ public class DiagnosisService {
                     : (avgDuration > 5000 ? "HIGH" : (avgDuration > 2000 ? "MEDIUM" : "LOW"));
 
             double stdDeviation = stdDev(durations, avgDuration);
-            // Coefficient of variation — stddev relative to the mean. Low CV means
-            // requests are consistently slow together (a real pattern); high CV
-            // means the average is being dragged up by a few spikes among mostly
-            // normal requests (weaker evidence of a systemic issue).
             double coefficientOfVariation = avgDuration > 0 ? stdDeviation / avgDuration : 0.0;
 
             String confidence;
@@ -300,32 +256,8 @@ public class DiagnosisService {
         return List.of();
     }
 
-    // Statistical anomaly detection against the endpoint's OWN history — the
-    // piece that separates this from a flat-threshold system. Instead of
-    // asking "is this endpoint above one global number," this asks "is this
-    // endpoint currently behaving differently than IT normally does."
-    //
-    // Splits the endpoint's own lookback-window records by time midpoint
-    // (earliest timestamp seen -> latest timestamp seen, cut in half) rather
-    // than fetching a separate calendar period further back. This means the
-    // baseline self-adapts to however much history actually exists instead of
-    // requiring data outside the diagnosis window — an endpoint with 2 days
-    // of real telemetry gets a same-day early-vs-late comparison, an endpoint
-    // with 90 days gets a much more stable long-baseline comparison. Same
-    // core statistic (z-score vs baseline mean/stddev) either way.
-    //
-    // Deliberately conservative: requires MIN_BASELINE_SAMPLE_COUNT samples in
-    // the OLDER half before computing anything. If an endpoint is new or hasn't
-    // accumulated enough telemetry yet, this returns no finding rather than
-    // fabricating a baseline from a handful of points — a thin, noisy baseline
-    // is worse than no baseline, since it would produce false confidence.
-    //
-    // Only flags REGRESSIONS (current worse than baseline), not improvements —
-    // an endpoint getting faster than its baseline is not a diagnosis finding.
     private List<DiagnosisFinding> checkPerformanceRegression(String endpoint, List<Telemetry> records) {
         if (records.size() < MIN_BASELINE_SAMPLE_COUNT * 2) {
-            // Need enough total records to split into two meaningful halves —
-            // this is a fast pre-check before doing the timestamp math below.
             return List.of();
         }
 
@@ -336,9 +268,6 @@ public class DiagnosisService {
         }
 
         long totalSeconds = java.time.Duration.between(earliest, latest).getSeconds();
-        // Need real time spread to split meaningfully — if everything landed
-        // within a couple minutes of each other, there's no "earlier vs later"
-        // to compare, just one burst.
         if (totalSeconds < 120) {
             return List.of();
         }
@@ -365,15 +294,12 @@ public class DiagnosisService {
                 .average()
                 .orElse(0.0);
 
-        // Guard against a near-flat baseline (stddev ~0) producing an absurd
-        // z-score off a tiny denominator — fall back to a simple ratio check
-        // in that case instead of dividing by (near) zero.
         boolean flatBaseline = baselineStdDeviation < 1.0;
         double zScore = flatBaseline ? 0.0 : (currentMean - baselineMean) / baselineStdDeviation;
         double ratio = baselineMean > 0 ? currentMean / baselineMean : 0.0;
 
         boolean isRegression = flatBaseline
-                ? ratio >= 1.5 && (currentMean - baselineMean) > 50 // at least 50ms of real, not rounding-noise, drift
+                ? ratio >= 1.5 && (currentMean - baselineMean) > 50
                 : zScore >= REGRESSION_Z_SCORE_THRESHOLD;
 
         if (!isRegression) {
@@ -480,9 +406,6 @@ public class DiagnosisService {
                     : (maxQueryCount > 50 ? "HIGH" : (maxQueryCount > 25 ? "MEDIUM" : "LOW"));
 
             double stdDeviation = stdDev(counts, avgQueryCount);
-            // How many of the observed requests actually crossed the threshold, not
-            // just the single max — a pattern that recurs across most requests is
-            // stronger evidence than one spike among otherwise-normal counts.
             long overThresholdCount = counts.stream()
                     .filter(c -> c > thresholds.possibleNPlusOneQueryThreshold)
                     .count();
@@ -617,10 +540,6 @@ public class DiagnosisService {
         return checkMissingIndexCandidateFromPlans(endpoint, plans, thresholds);
     }
 
-    // Batched variant — takes plans already fetched (and pre-filtered to this
-    // endpoint) by runDiagnosis in one query for all endpoints, instead of
-    // querying here. Same logic as checkMissingIndexCandidate above, just
-    // without the per-endpoint database round trip.
     private List<DiagnosisFinding> checkMissingIndexCandidateFromPlans(String endpoint, List<SlowQueryPlan> plans, Thresholds thresholds) {
         if (plans.isEmpty()) {
             return List.of();
