@@ -56,7 +56,14 @@ public class NarrativeService {
             "the root cause: name the actual table(s), whether it's a sequential scan, and roughly how " +
             "many rows are being scanned, instead of speaking generically about 'the database'. If that " +
             "section is absent, don't imply you've seen the query — describe the pattern from the " +
-            "aggregate numbers only.";
+            "aggregate numbers only. " +
+            "If a 'Business Context' line is present below, it's a note from the app's owner describing " +
+            "what this endpoint actually does for a real user. Use it to add ONE short clause tying the " +
+            "technical root cause to the real-world consequence for that user or the business — e.g. " +
+            "'...which matters here because this is the page students hit right before their exam starts, " +
+            "so a 2-second delay risks panic re-clicks and duplicate submissions' — instead of stopping at " +
+            "the technical explanation alone. Do not invent a business consequence if no Business Context " +
+            "line is given; in that case, explain the technical pattern only, exactly as you would today.";
 
     // New: EXPLAIN-plan-to-plain-English translator (AI wow feature #1, Slow Queries page).
     // Low temp (0.3) — this is a factual translation, not creative prose.
@@ -70,19 +77,28 @@ public class NarrativeService {
 
     private final GeminiKeyRotator keyRotator;
     private final SlowQueryPlanRepository slowQueryPlanRepository;
+    private final EndpointBusinessContextRepository businessContextRepository;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
-    public NarrativeService(GeminiKeyRotator keyRotator, SlowQueryPlanRepository slowQueryPlanRepository) {
+    public NarrativeService(GeminiKeyRotator keyRotator, SlowQueryPlanRepository slowQueryPlanRepository,
+                             EndpointBusinessContextRepository businessContextRepository) {
         this.keyRotator = keyRotator;
         this.slowQueryPlanRepository = slowQueryPlanRepository;
+        this.businessContextRepository = businessContextRepository;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
         this.objectMapper = new ObjectMapper();
     }
 
+    // Back-compat overload — no applicationName means no business-context lookup,
+    // narrative behaves exactly as before this feature existed.
     public EndpointNarrative generateNarrative(String endpoint, List<DiagnosisFinding> findings) {
+        return generateNarrative(endpoint, findings, null);
+    }
+
+    public EndpointNarrative generateNarrative(String endpoint, List<DiagnosisFinding> findings, String applicationName) {
         List<String> ruleTypes = findings.stream()
                 .map(DiagnosisFinding::getRuleType)
                 .collect(Collectors.toList());
@@ -93,7 +109,7 @@ public class NarrativeService {
                     ruleTypes);
         }
 
-        String userPrompt = buildFindingsBlock(endpoint, findings);
+        String userPrompt = buildFindingsBlock(endpoint, findings, applicationName);
         try {
             String text = callGroq(SYSTEM_PROMPT, userPrompt, 0.7);
             return new EndpointNarrative(endpoint, text, ruleTypes);
@@ -123,9 +139,16 @@ public class NarrativeService {
         }
     }
 
-    private String buildFindingsBlock(String endpoint, List<DiagnosisFinding> findings) {
+    private String buildFindingsBlock(String endpoint, List<DiagnosisFinding> findings, String applicationName) {
         StringBuilder sb = new StringBuilder();
-        sb.append("Endpoint: ").append(endpoint).append("\n\nFindings:\n");
+        sb.append("Endpoint: ").append(endpoint).append("\n");
+
+        String businessContext = buildBusinessContextLine(endpoint, applicationName);
+        if (businessContext != null) {
+            sb.append(businessContext).append("\n");
+        }
+
+        sb.append("\nFindings:\n");
         for (DiagnosisFinding f : findings) {
             sb.append("- [").append(f.getRuleType()).append(", severity=").append(f.getSeverity());
             if (f.getConfidence() != null) {
@@ -145,6 +168,20 @@ public class NarrativeService {
         }
 
         return sb.toString();
+    }
+
+    // Looks up the owner-written "what this endpoint does for the business/
+    // user" note (see EndpointBusinessContext) and formats it as one line
+    // for the prompt. Returns null when applicationName wasn't provided, or
+    // no note exists for this endpoint yet — narrative then behaves exactly
+    // as it did before this feature, describing the technical pattern only.
+    private String buildBusinessContextLine(String endpoint, String applicationName) {
+        if (applicationName == null || applicationName.isBlank()) {
+            return null;
+        }
+        return businessContextRepository.findByApplicationNameAndEndpoint(applicationName, endpoint)
+                .map(ctx -> "Business Context: " + ctx.getDescription())
+                .orElse(null);
     }
 
     // Pulls the most recent real captured SlowQueryPlan(s) for this endpoint —

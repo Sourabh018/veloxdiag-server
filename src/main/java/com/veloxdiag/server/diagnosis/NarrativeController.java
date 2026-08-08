@@ -30,8 +30,9 @@ public class NarrativeController {
     }
 
     @GetMapping
-    public EndpointNarrative getNarrative(@org.springframework.web.bind.annotation.RequestParam String endpoint) {
+    public EndpointNarrative getNarrative(@org.springframework.web.bind.annotation.RequestParam String endpoint,
+                                           @org.springframework.web.bind.annotation.RequestParam(required = false) String applicationName) {
         List<DiagnosisFinding> findings = diagnosisService.getFindingsForEndpoint(endpoint);
-        return narrativeService.generateNarrative(endpoint, findings);
+        return narrativeService.generateNarrative(endpoint, findings, applicationName);
     }
 }
