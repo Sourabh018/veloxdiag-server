@@ -48,12 +48,10 @@ public class DiagnosisService {
 
     private static final long MIN_SAMPLE_COUNT = 6;
 
-    // Baseline window for PERFORMANCE_REGRESSION: how far back to look for an
-    // endpoint's own historical normal, and how many samples that history
-    // needs before we trust it enough to compute a baseline from it at all.
-    // Deliberately higher than MIN_SAMPLE_COUNT (6) — a baseline is a claim
-    // about "normal," not just "enough to mention," so it earns a stricter bar.
-    private static final long BASELINE_LOOKBACK_DAYS = 2;
+    // Minimum samples required in the OLDER half of an endpoint's window before
+    // trusting it as a baseline (see checkPerformanceRegression). Higher than
+    // MIN_SAMPLE_COUNT (6) — a baseline is a claim about "normal," not just
+    // "enough to mention," so it earns a stricter bar.
     private static final long MIN_BASELINE_SAMPLE_COUNT = 15;
     // z-score above which current performance is flagged as a regression
     // relative to the endpoint's own baseline (not a global constant).
@@ -159,17 +157,6 @@ public class DiagnosisService {
         Map<String, List<Telemetry>> byEndpoint = allTelemetry.stream()
                 .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
 
-        // Baseline window: the BASELINE_LOOKBACK_DAYS immediately before the
-        // current lookback window starts — i.e. this endpoint's own recent
-        // history, kept separate from the window being diagnosed so "current"
-        // and "normal" are never the same data compared against itself.
-        LocalDateTime baselineStart = cutoff.minusDays(BASELINE_LOOKBACK_DAYS);
-        List<Telemetry> baselineTelemetry = (applicationName == null || applicationName.isBlank())
-                ? telemetryRepository.findByTimestampBetween(baselineStart, cutoff)
-                : telemetryRepository.findByApplicationNameAndTimestampBetween(applicationName, baselineStart, cutoff);
-        Map<String, List<Telemetry>> baselineByEndpoint = baselineTelemetry.stream()
-                .collect(Collectors.groupingBy(t -> EndpointNormalizer.normalize(t.getEndpoint())));
-
         List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules =
                 ruleEngineService.loadEnabledRules();
 
@@ -180,19 +167,17 @@ public class DiagnosisService {
         for (Map.Entry<String, List<Telemetry>> entry : byEndpoint.entrySet()) {
             String endpoint = entry.getKey();
             List<SlowQueryPlan> plansForEndpoint = plansByEndpoint.getOrDefault(endpoint, List.of());
-            List<Telemetry> baselineForEndpoint = baselineByEndpoint.getOrDefault(endpoint, List.of());
-            findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, baselineForEndpoint, rules, thresholds));
+            findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, rules, thresholds));
         }
 
         return findings;
     }
 
     // Batched path — used by runDiagnosis, takes pre-fetched rules, pre-fetched
-    // (already endpoint-filtered) seq-scan plans, pre-fetched baseline-window
-    // telemetry for this endpoint, and the resolved thresholds for the
-    // application being diagnosed.
+    // (already endpoint-filtered) seq-scan plans, and the resolved thresholds
+    // for the application being diagnosed.
     private List<DiagnosisFinding> computeEndpointFindings(
-            String endpoint, List<Telemetry> records, List<SlowQueryPlan> seqScanPlans, List<Telemetry> baselineRecords,
+            String endpoint, List<Telemetry> records, List<SlowQueryPlan> seqScanPlans,
             List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules, Thresholds thresholds) {
         List<DiagnosisFinding> endpointFindings = new ArrayList<>();
         endpointFindings.addAll(checkSlowRequest(endpoint, records, thresholds));
@@ -200,7 +185,7 @@ public class DiagnosisService {
         endpointFindings.addAll(checkServerErrors(endpoint, records, thresholds));
         endpointFindings.addAll(checkPossibleNPlusOne(endpoint, records, thresholds));
         endpointFindings.addAll(checkMissingIndexCandidateFromPlans(endpoint, seqScanPlans, thresholds));
-        endpointFindings.addAll(checkPerformanceRegression(endpoint, records, baselineRecords));
+        endpointFindings.addAll(checkPerformanceRegression(endpoint, records));
 
         List<DiagnosisFinding> combined = new ArrayList<>(endpointFindings);
         combined.addAll(correlateFindings(endpoint, records, endpointFindings, thresholds));
@@ -212,25 +197,21 @@ public class DiagnosisService {
     // Unbatched path — used only by getFindingsForEndpoint, which evaluates a
     // single endpoint on demand (e.g. the "Explain this" narrative fetch). This
     // path has no application context (endpoint names are looked up without
-    // knowing which app they belong to), so it uses the DEFAULT_KEY thresholds
-    // and an all-apps baseline window — same narrow gap noted below, now also
-    // applying to the baseline: if the same endpoint name exists in two apps,
-    // their history gets pooled here instead of kept separate.
+    // knowing which app they belong to), so it uses the DEFAULT_KEY thresholds.
+    // Known limitation: if the same endpoint name exists in two different apps
+    // with different tuned thresholds, this path won't pick the right one —
+    // narrow gap, only affects the single-endpoint narrative/explain feature,
+    // not the main Diagnosis/Dashboard/Index Advisor views.
     private List<DiagnosisFinding> computeEndpointFindings(String endpoint, List<Telemetry> records,
                                                              LocalDateTime cutoff) {
         Thresholds thresholds = resolveThresholds(null);
-        LocalDateTime baselineStart = cutoff.minusDays(BASELINE_LOOKBACK_DAYS);
-        List<Telemetry> baselineRecords = telemetryRepository.findByTimestampBetween(baselineStart, cutoff).stream()
-                .filter(t -> endpoint.equals(EndpointNormalizer.normalize(t.getEndpoint())))
-                .collect(Collectors.toList());
-
         List<DiagnosisFinding> endpointFindings = new ArrayList<>();
         endpointFindings.addAll(checkSlowRequest(endpoint, records, thresholds));
         endpointFindings.addAll(checkHighErrorRate(endpoint, records, thresholds));
         endpointFindings.addAll(checkServerErrors(endpoint, records, thresholds));
         endpointFindings.addAll(checkPossibleNPlusOne(endpoint, records, thresholds));
         endpointFindings.addAll(checkMissingIndexCandidate(endpoint, cutoff, thresholds));
-        endpointFindings.addAll(checkPerformanceRegression(endpoint, records, baselineRecords));
+        endpointFindings.addAll(checkPerformanceRegression(endpoint, records));
 
         List<DiagnosisFinding> combined = new ArrayList<>(endpointFindings);
         combined.addAll(correlateFindings(endpoint, records, endpointFindings, thresholds));
@@ -324,16 +305,52 @@ public class DiagnosisService {
     // asking "is this endpoint above one global number," this asks "is this
     // endpoint currently behaving differently than IT normally does."
     //
-    // Deliberately conservative: requires MIN_BASELINE_SAMPLE_COUNT samples of
-    // real history before computing anything. If an endpoint is new or hasn't
+    // Splits the endpoint's own lookback-window records by time midpoint
+    // (earliest timestamp seen -> latest timestamp seen, cut in half) rather
+    // than fetching a separate calendar period further back. This means the
+    // baseline self-adapts to however much history actually exists instead of
+    // requiring data outside the diagnosis window — an endpoint with 2 days
+    // of real telemetry gets a same-day early-vs-late comparison, an endpoint
+    // with 90 days gets a much more stable long-baseline comparison. Same
+    // core statistic (z-score vs baseline mean/stddev) either way.
+    //
+    // Deliberately conservative: requires MIN_BASELINE_SAMPLE_COUNT samples in
+    // the OLDER half before computing anything. If an endpoint is new or hasn't
     // accumulated enough telemetry yet, this returns no finding rather than
     // fabricating a baseline from a handful of points — a thin, noisy baseline
     // is worse than no baseline, since it would produce false confidence.
     //
     // Only flags REGRESSIONS (current worse than baseline), not improvements —
     // an endpoint getting faster than its baseline is not a diagnosis finding.
-    private List<DiagnosisFinding> checkPerformanceRegression(String endpoint, List<Telemetry> currentRecords,
-                                                                 List<Telemetry> baselineRecords) {
+    private List<DiagnosisFinding> checkPerformanceRegression(String endpoint, List<Telemetry> records) {
+        if (records.size() < MIN_BASELINE_SAMPLE_COUNT * 2) {
+            // Need enough total records to split into two meaningful halves —
+            // this is a fast pre-check before doing the timestamp math below.
+            return List.of();
+        }
+
+        java.time.LocalDateTime earliest = records.stream().map(Telemetry::getTimestamp).min(java.time.LocalDateTime::compareTo).orElse(null);
+        java.time.LocalDateTime latest = records.stream().map(Telemetry::getTimestamp).max(java.time.LocalDateTime::compareTo).orElse(null);
+        if (earliest == null || latest == null) {
+            return List.of();
+        }
+
+        long totalSeconds = java.time.Duration.between(earliest, latest).getSeconds();
+        // Need real time spread to split meaningfully — if everything landed
+        // within a couple minutes of each other, there's no "earlier vs later"
+        // to compare, just one burst.
+        if (totalSeconds < 120) {
+            return List.of();
+        }
+        java.time.LocalDateTime midpoint = earliest.plusSeconds(totalSeconds / 2);
+
+        List<Telemetry> baselineRecords = records.stream()
+                .filter(t -> t.getTimestamp().isBefore(midpoint))
+                .collect(Collectors.toList());
+        List<Telemetry> currentRecords = records.stream()
+                .filter(t -> !t.getTimestamp().isBefore(midpoint))
+                .collect(Collectors.toList());
+
         List<Long> baselineDurations = baselineRecords.stream().map(Telemetry::getDurationMs).collect(Collectors.toList());
 
         if (baselineDurations.size() < MIN_BASELINE_SAMPLE_COUNT || currentRecords.isEmpty()) {
@@ -384,15 +401,14 @@ public class DiagnosisService {
         evidence.put("baselineMeanMs", baselineMean);
         evidence.put("baselineStdDeviationMs", baselineStdDeviation);
         evidence.put("baselineSampleCount", baselineDurations.size());
-        evidence.put("baselineWindowDays", BASELINE_LOOKBACK_DAYS);
         evidence.put("zScore", zScore);
         evidence.put("conditionMatched", conditionMatched);
 
         String message = String.format(
-                "Endpoint %s is currently averaging %.0fms, which is a real regression against its own %d-day baseline " +
-                        "of %.0fms (\u00b1%.0fms, n=%d) — %s. This is a change relative to how this specific endpoint normally " +
-                        "behaves, not just a comparison against a fixed threshold.",
-                endpoint, currentMean, BASELINE_LOOKBACK_DAYS, baselineMean, baselineStdDeviation, baselineDurations.size(),
+                "Endpoint %s is currently averaging %.0fms, a real regression against its own earlier-window baseline " +
+                        "of %.0fms (\u00b1%.0fms, n=%d) — %s. This compares the endpoint against its own recent history, " +
+                        "not a fixed threshold shared by every endpoint.",
+                endpoint, currentMean, baselineMean, baselineStdDeviation, baselineDurations.size(),
                 flatBaseline
                         ? String.format("%.1fx slower than baseline", ratio)
                         : String.format("%.1f standard deviations above baseline", zScore));
