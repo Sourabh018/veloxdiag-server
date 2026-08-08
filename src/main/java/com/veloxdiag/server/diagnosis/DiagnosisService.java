@@ -258,6 +258,7 @@ public class DiagnosisService {
 
     private List<DiagnosisFinding> checkPerformanceRegression(String endpoint, List<Telemetry> records) {
         if (records.size() < MIN_BASELINE_SAMPLE_COUNT * 2) {
+            System.out.println("[REGRESSION-DEBUG] " + endpoint + ": SKIP - only " + records.size() + " total records, need >= " + (MIN_BASELINE_SAMPLE_COUNT * 2));
             return List.of();
         }
 
@@ -269,6 +270,7 @@ public class DiagnosisService {
 
         long totalSeconds = java.time.Duration.between(earliest, latest).getSeconds();
         if (totalSeconds < 120) {
+            System.out.println("[REGRESSION-DEBUG] " + endpoint + ": SKIP - only " + totalSeconds + " seconds of time spread across " + records.size() + " records, need >= 120");
             return List.of();
         }
         java.time.LocalDateTime midpoint = earliest.plusSeconds(totalSeconds / 2);
@@ -283,6 +285,7 @@ public class DiagnosisService {
         List<Long> baselineDurations = baselineRecords.stream().map(Telemetry::getDurationMs).collect(Collectors.toList());
 
         if (baselineDurations.size() < MIN_BASELINE_SAMPLE_COUNT || currentRecords.isEmpty()) {
+            System.out.println("[REGRESSION-DEBUG] " + endpoint + ": SKIP - baseline half has " + baselineDurations.size() + " samples (need >= " + MIN_BASELINE_SAMPLE_COUNT + "), current half has " + currentRecords.size() + ", totalSeconds=" + totalSeconds);
             return List.of();
         }
 
@@ -301,6 +304,8 @@ public class DiagnosisService {
         boolean isRegression = flatBaseline
                 ? ratio >= 1.5 && (currentMean - baselineMean) > 50
                 : zScore >= REGRESSION_Z_SCORE_THRESHOLD;
+
+        System.out.println(String.format("[REGRESSION-DEBUG] %s: baselineMean=%.0fms baselineStdDev=%.0fms baselineN=%d | currentMean=%.0fms currentN=%d | zScore=%.2f ratio=%.2f flatBaseline=%s totalSeconds=%d | FIRES=%s", endpoint, baselineMean, baselineStdDeviation, baselineDurations.size(), currentMean, currentRecords.size(), zScore, ratio, flatBaseline, totalSeconds, isRegression));
 
         if (!isRegression) {
             return List.of();
