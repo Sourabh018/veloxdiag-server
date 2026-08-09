@@ -4,6 +4,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import com.veloxdiag.server.repository.SlowQueryPlanRepository;
+import com.veloxdiag.server.repository.TelemetryRepository;
+
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.List;
@@ -21,10 +24,16 @@ import java.util.stream.Collectors;
 public class ApplicationController {
 
     private final ApplicationRepository applicationRepository;
+    private final TelemetryRepository telemetryRepository;
+    private final SlowQueryPlanRepository slowQueryPlanRepository;
     private final SecureRandom secureRandom = new SecureRandom();
 
-    public ApplicationController(ApplicationRepository applicationRepository) {
+    public ApplicationController(ApplicationRepository applicationRepository,
+                                  TelemetryRepository telemetryRepository,
+                                  SlowQueryPlanRepository slowQueryPlanRepository) {
         this.applicationRepository = applicationRepository;
+        this.telemetryRepository = telemetryRepository;
+        this.slowQueryPlanRepository = slowQueryPlanRepository;
     }
 
     @PostMapping
@@ -36,7 +45,20 @@ public class ApplicationController {
         if (request.getName() == null || request.getName().isBlank()) {
             return ResponseEntity.badRequest().body("Application name is required.");
         }
-        if (applicationRepository.findByName(request.getName()).isPresent()) {
+
+        // If it already exists AND belongs to the caller, this is a retry —
+        // e.g. the register call succeeded but the client never got past the
+        // snippet screen (Render cold-start timeout, page reload, etc.) and
+        // the dashboard's GET /api/applications came back empty on the next
+        // load, sending them back through this same form. Returning the
+        // existing row (not a fresh key — the old key is already in their
+        // real app's config) is the useful behavior; a 409 with no way
+        // forward is not.
+        var existing = applicationRepository.findByName(request.getName());
+        if (existing.isPresent()) {
+            if (existing.get().getOwnerUserId().equals(current.getId())) {
+                return ResponseEntity.ok(existing.get());
+            }
             return ResponseEntity.status(HttpStatus.CONFLICT).body("An application with this name already exists.");
         }
 
@@ -62,11 +84,12 @@ public class ApplicationController {
         return ResponseEntity.ok(apps);
     }
 
-    // Deletes only the Application row (registration + ingest key) — never
-    // touches Telemetry, which stores applicationName as a plain string with
-    // no FK back to this table (see Application.java javadoc on why name
-    // isn't even per-owner-scoped). Re-registering the same name afterward
-    // just picks the existing telemetry back up under a fresh key.
+    // Deletes the Application row AND all its data — every Telemetry and
+    // SlowQueryPlan row for this applicationName goes with it. Same two
+    // deleteByApplicationName queries the old Settings "Reset Application
+    // Data" feature uses, just triggered from here instead. Irreversible:
+    // no separate confirm token gate like Reset has, so the frontend is
+    // responsible for a real confirmation step before calling this.
     @DeleteMapping("/{name}")
     public ResponseEntity<?> deleteApplication(@PathVariable String name) {
         User current = CurrentUserContext.get();
@@ -80,6 +103,8 @@ public class ApplicationController {
         if (!app.getOwnerUserId().equals(current.getId())) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body("You do not own this application.");
         }
+        telemetryRepository.deleteByApplicationName(name);
+        slowQueryPlanRepository.deleteByApplicationName(name);
         applicationRepository.delete(app);
         return ResponseEntity.noContent().build();
     }
