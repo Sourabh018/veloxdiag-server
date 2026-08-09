@@ -15,6 +15,28 @@ public class DiagnosisFinding {
     private String confidence;            // "HIGH", "MEDIUM", "LOW" — how strongly the evidence supports the correlation
     private List<String> relatedFindings; // ruleTypes this finding correlates, e.g. ["SLOW_REQUEST", "POSSIBLE_N_PLUS_ONE"]
 
+    // New field, only populated when this exact (endpoint, ruleType) was
+    // previously marked "fixed" via the Fixes page (see FixSnapshot) and has
+    // now fired again in this diagnosis run. Null for everything else — no
+    // behavior change for findings that were never marked fixed. This is
+    // Regression Watch: a PASSIVE check that surfaces "this came back" right
+    // on the Diagnosis page itself, rather than requiring someone to
+    // separately open the Fixes page and notice the status flipped.
+    private ReopenedInfo reopenedInfo;
+
+    public static class ReopenedInfo {
+        private String markedFixedAt;
+        private String note;
+
+        public ReopenedInfo(String markedFixedAt, String note) {
+            this.markedFixedAt = markedFixedAt;
+            this.note = note;
+        }
+
+        public String getMarkedFixedAt() { return markedFixedAt; }
+        public String getNote() { return note; }
+    }
+
     // Original constructor — unchanged signature, so every existing checkX() call site
     // in DiagnosisService still compiles with zero edits.
     public DiagnosisFinding(String ruleType, String severity, String endpoint, String message, Object evidence) {
@@ -40,4 +62,7 @@ public class DiagnosisFinding {
     public Object getEvidence() { return evidence; }
     public String getConfidence() { return confidence; }
     public List<String> getRelatedFindings() { return relatedFindings; }
+
+    public ReopenedInfo getReopenedInfo() { return reopenedInfo; }
+    public void setReopenedInfo(ReopenedInfo reopenedInfo) { this.reopenedInfo = reopenedInfo; }
 }

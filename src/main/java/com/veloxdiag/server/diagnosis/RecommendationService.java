@@ -254,11 +254,16 @@ public class RecommendationService {
             "captured EXPLAIN plan shows a sequential scan). Your job is narrower: given a finding that's " +
             "ALREADY been decided, explain HOW to fix it — you are not deciding whether it's a real problem.\n" +
             "- Monitored applications on this platform include Java Spring Boot services (JPA/Hibernate + " +
-            "MySQL or PostgreSQL) and a Node/Express/Mongoose service backed by MongoDB. If the endpoint " +
-            "path or evidence gives you no clue which stack it's on, give framework-appropriate advice for " +
-            "the most likely stack based on the finding's shape, and briefly note the Mongoose/MongoDB " +
-            "equivalent (e.g. .populate() or a lookup aggregation stage in place of a JOIN FETCH) as an " +
-            "alternative in case it's the Node service instead.\n\n" +
+            "MySQL or PostgreSQL) and non-JPA services (e.g. Node/Express backed by MongoDB) that only " +
+            "report request timing, with no SQL query evidence at all. A 'Detected Stack' line is given " +
+            "below the finding — it's computed from real evidence (SQL query counts and/or a captured " +
+            "EXPLAIN plan present or absent), not a guess, and you MUST follow it exactly: if it says this " +
+            "is a SQL/JPA app, give SQL/JPA-only advice and do not mention MongoDB, Mongoose, NoSQL, or any " +
+            "non-relational alternative anywhere in your answer — not even briefly, not even as an aside. " +
+            "Only if the Detected Stack line says the stack is unclear should you give framework-appropriate " +
+            "advice for the most likely stack based on the finding's shape, and may then briefly note a " +
+            "Mongoose/MongoDB equivalent (e.g. .populate() or a lookup aggregation stage in place of a JOIN " +
+            "FETCH) as an alternative in case it's a Node service instead.\n\n" +
             "Given the finding below (rule type, severity, message, and whatever real evidence is present), " +
             "write a detailed, endpoint-specific suggestion: 4-6 sentences plus one short illustrative code " +
             "example. Write like you're messaging a teammate the fix, not filling out an incident report — " +
@@ -313,13 +318,15 @@ public class RecommendationService {
             return new RecommendationExplanation(endpoint, ruleType, fallbackText, false);
         }
 
+        String capturedEvidence = buildCapturedEvidenceBlock(endpoint);
         String userPrompt =
                 "Endpoint: " + endpoint + "\n" +
                 "Rule type: " + finding.getRuleType() + "\n" +
                 "Severity: " + finding.getSeverity() + "\n" +
                 "Message: " + finding.getMessage() + "\n" +
                 (finding.getEvidence() != null ? "Evidence: " + finding.getEvidence() + "\n" : "") +
-                buildCapturedEvidenceBlock(endpoint);
+                "Detected Stack: " + detectStack(finding, capturedEvidence) + "\n" +
+                capturedEvidence;
 
         try {
             String result = callGroqForSuggestion(SUGGESTION_SYSTEM_PROMPT, userPrompt);
@@ -486,6 +493,26 @@ public class RecommendationService {
     // Shared by generateAiSuggestion() for ANY finding type, not just the
     // MISSING_INDEX_CANDIDATE path buildIndexRecommendation() already used.
     // Returns "" (not null) so it's safe to concatenate directly into the prompt.
+    // Computed from real facts, not left to the LLM to guess — this is what
+    // fixed the Mongoose/MongoDB text bleeding into findings for CET_CELL
+    // (a pure Java/Postgres app) that was spotted in testing. Query-count
+    // evidence (maxQueryCount/averageQueryCount) only ever gets populated by
+    // the Hibernate StatementInspector in veloxdiag-starter — a non-JPA app
+    // physically cannot produce it — so its presence alone is a hard signal,
+    // not a guess. Same for a captured EXPLAIN plan: that's Postgres/MySQL
+    // syntax, never produced for a MongoDB app.
+    private String detectStack(DiagnosisFinding finding, String capturedEvidence) {
+        boolean hasSqlEvidence = capturedEvidence != null && !capturedEvidence.isBlank();
+        if (!hasSqlEvidence && finding.getEvidence() instanceof Map) {
+            Map<?, ?> evidenceMap = (Map<?, ?>) finding.getEvidence();
+            hasSqlEvidence = evidenceMap.containsKey("maxQueryCount")
+                    || evidenceMap.containsKey("averageQueryCount");
+        }
+        return hasSqlEvidence
+                ? "SQL/JPA (Java + Hibernate) — confirmed by real SQL query-count and/or EXPLAIN-plan evidence for this finding. Do not mention MongoDB/Mongoose."
+                : "Unclear — no SQL query-count or EXPLAIN-plan evidence is present for this finding, so this may be a non-JPA app.";
+    }
+
     private String buildCapturedEvidenceBlock(String endpoint) {
         List<SlowQueryPlan> plans = slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
         if (plans == null || plans.isEmpty()) {

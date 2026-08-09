@@ -63,7 +63,13 @@ public class NarrativeService {
             "'...which matters here because this is the page students hit right before their exam starts, " +
             "so a 2-second delay risks panic re-clicks and duplicate submissions' — instead of stopping at " +
             "the technical explanation alone. Do not invent a business consequence if no Business Context " +
-            "line is given; in that case, explain the technical pattern only, exactly as you would today.";
+            "line is given; in that case, explain the technical pattern only, exactly as you would today. " +
+            "If a 'Data Growth' section is present below, it shows a table's row count growing over time " +
+            "based on real captured EXPLAIN plans (earliest vs most recent capture). When present, treat " +
+            "it as the answer to WHY THIS STARTED NOW, distinct from WHY IT HAPPENS — e.g. 'this query " +
+            "wasn't a problem when exam_attempts had 500 rows, but now that it's grown past 3,000 rows the " +
+            "same query pattern is slow.' Only mention growth as the trigger if this section is present; " +
+            "never invent or guess that a table has grown when it isn't given.";
 
     // New: EXPLAIN-plan-to-plain-English translator (AI wow feature #1, Slow Queries page).
     // Low temp (0.3) — this is a factual translation, not creative prose.
@@ -78,14 +84,17 @@ public class NarrativeService {
     private final GeminiKeyRotator keyRotator;
     private final SlowQueryPlanRepository slowQueryPlanRepository;
     private final EndpointBusinessContextRepository businessContextRepository;
+    private final DataGrowthService dataGrowthService;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
     public NarrativeService(GeminiKeyRotator keyRotator, SlowQueryPlanRepository slowQueryPlanRepository,
-                             EndpointBusinessContextRepository businessContextRepository) {
+                             EndpointBusinessContextRepository businessContextRepository,
+                             DataGrowthService dataGrowthService) {
         this.keyRotator = keyRotator;
         this.slowQueryPlanRepository = slowQueryPlanRepository;
         this.businessContextRepository = businessContextRepository;
+        this.dataGrowthService = dataGrowthService;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
@@ -167,6 +176,33 @@ public class NarrativeService {
             sb.append(capturedEvidence);
         }
 
+        String growthBlock = buildDataGrowthBlock(endpoint);
+        if (growthBlock != null) {
+            sb.append("\nData Growth (row-count trend from captured EXPLAIN plans over time):\n");
+            sb.append(growthBlock);
+        }
+
+        return sb.toString();
+    }
+
+    // Pulls table growth trends (see DataGrowthService) for this endpoint and
+    // formats them for the prompt. Returns null if no table shows meaningful
+    // growth (>=15%, >=3 data points) — narrative then answers WHY only, not
+    // WHY NOW, exactly as it did before this feature existed.
+    private String buildDataGrowthBlock(String endpoint) {
+        List<TableGrowthTrend> trends = dataGrowthService.getGrowthTrends(endpoint);
+        if (trends.isEmpty()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (TableGrowthTrend t : trends) {
+            sb.append("- ").append(t.getTableName())
+                    .append(": ~").append(t.getEarliestRowCount()).append(" rows (first captured ")
+                    .append(t.getEarliestCapturedAt()).append(") -> ~").append(t.getLatestRowCount())
+                    .append(" rows (most recent capture ").append(t.getLatestCapturedAt())
+                    .append("), +").append(String.format("%.0f", t.getGrowthPercent())).append("% growth")
+                    .append(" (based on ").append(t.getDataPoints()).append(" captures)\n");
+        }
         return sb.toString();
     }
 

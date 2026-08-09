@@ -26,6 +26,13 @@ public interface SlowQueryPlanRepository extends JpaRepository<SlowQueryPlan, Lo
     // demand rather than only the flagged ones.
     List<SlowQueryPlan> findTop3ByEndpointOrderByTimestampDesc(String endpoint);
 
+    // Full seq-scan history for one endpoint, oldest first — used by
+    // DataGrowthService to compare the earliest captured row estimate for a
+    // table against the most recent one, to detect "this table has grown,
+    // that's likely why this endpoint got slower recently" rather than only
+    // ever showing the current snapshot.
+    List<SlowQueryPlan> findByEndpointAndContainsSeqScanTrueOrderByTimestampAsc(String endpoint);
+
     // Deletes every slow-query-plan row for one application — paired with
     // TelemetryRepository.deleteByApplicationName so a Settings-page reset
     // clears both tables for that app, not just telemetry (otherwise Slow

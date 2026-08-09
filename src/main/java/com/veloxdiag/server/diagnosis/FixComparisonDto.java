@@ -25,6 +25,8 @@ public class FixComparisonDto {
 
     private Double improvementPercent; // positive = faster, negative = slower; null if WATCHING
     private String status;
+    private String verdictNote; // e.g. "still within this endpoint's normal noise range" — shown when
+                                 // status stays WATCHING/NO_CHANGE for noise reasons rather than sample count
 
     public FixComparisonDto() {
     }
@@ -70,4 +72,7 @@ public class FixComparisonDto {
 
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
+
+    public String getVerdictNote() { return verdictNote; }
+    public void setVerdictNote(String verdictNote) { this.verdictNote = verdictNote; }
 }

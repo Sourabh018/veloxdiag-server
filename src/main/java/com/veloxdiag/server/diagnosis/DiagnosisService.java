@@ -53,17 +53,20 @@ public class DiagnosisService {
     private final TelemetryWindowSettings windowSettings;
     private final RuleEngineService ruleEngineService;
     private final SlowQueryPlanRepository slowQueryPlanRepository;
+    private final FixSnapshotRepository fixSnapshotRepository;
 
     private static final Pattern SEQ_SCAN_PATTERN = Pattern.compile(
             "Seq Scan on (\\w+)(?:\\s+\\w+)?\\s*\\(cost=[\\d.]+\\.\\.[\\d.]+ rows=(\\d+)"
     );
 
     public DiagnosisService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings,
-                             RuleEngineService ruleEngineService, SlowQueryPlanRepository slowQueryPlanRepository) {
+                             RuleEngineService ruleEngineService, SlowQueryPlanRepository slowQueryPlanRepository,
+                             FixSnapshotRepository fixSnapshotRepository) {
         this.telemetryRepository = telemetryRepository;
         this.windowSettings = windowSettings;
         this.ruleEngineService = ruleEngineService;
         this.slowQueryPlanRepository = slowQueryPlanRepository;
+        this.fixSnapshotRepository = fixSnapshotRepository;
         thresholdsByApp.put(DEFAULT_KEY, new Thresholds(1000.0, 3, 500, 15, 500));
     }
 
@@ -144,7 +147,7 @@ public class DiagnosisService {
         for (Map.Entry<String, List<Telemetry>> entry : byEndpoint.entrySet()) {
             String endpoint = entry.getKey();
             List<SlowQueryPlan> plansForEndpoint = plansByEndpoint.getOrDefault(endpoint, List.of());
-            findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, rules, thresholds));
+            findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, rules, thresholds, applicationName));
         }
 
         return findings;
@@ -152,7 +155,8 @@ public class DiagnosisService {
 
     private List<DiagnosisFinding> computeEndpointFindings(
             String endpoint, List<Telemetry> records, List<SlowQueryPlan> seqScanPlans,
-            List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules, Thresholds thresholds) {
+            List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules, Thresholds thresholds,
+            String applicationName) {
         List<DiagnosisFinding> endpointFindings = new ArrayList<>();
         endpointFindings.addAll(checkSlowRequest(endpoint, records, thresholds));
         endpointFindings.addAll(checkHighErrorRate(endpoint, records, thresholds));
@@ -164,6 +168,7 @@ public class DiagnosisService {
         List<DiagnosisFinding> combined = new ArrayList<>(endpointFindings);
         combined.addAll(correlateFindings(endpoint, records, endpointFindings, thresholds));
         combined.addAll(ruleEngineService.evaluate(endpoint, records, rules));
+        attachRegressionWatch(applicationName, combined);
 
         return combined;
     }
@@ -182,8 +187,32 @@ public class DiagnosisService {
         List<DiagnosisFinding> combined = new ArrayList<>(endpointFindings);
         combined.addAll(correlateFindings(endpoint, records, endpointFindings, thresholds));
         combined.addAll(ruleEngineService.evaluate(endpoint, records));
+        attachRegressionWatch(null, combined);
 
         return combined;
+    }
+
+    // Regression Watch: passively cross-references every finding against
+    // FixSnapshot history (see FixTrackingService/Fixes page) — if this exact
+    // (endpoint, ruleType) was previously marked fixed and the SAME rule has
+    // fired again right here in this diagnosis pass, that's a direct signal
+    // the fix didn't hold, surfaced right on the Diagnosis page itself rather
+    // than requiring a separate manual check of the Fixes page. Deliberately
+    // skips ROOT_CAUSE_CORRELATION findings — those don't have a single
+    // concrete ruleType a fix would have been marked against.
+    private void attachRegressionWatch(String applicationName, List<DiagnosisFinding> findings) {
+        for (DiagnosisFinding finding : findings) {
+            if ("ROOT_CAUSE_CORRELATION".equals(finding.getRuleType())) continue;
+
+            Optional<FixSnapshot> snapshot = (applicationName == null || applicationName.isBlank())
+                    ? fixSnapshotRepository.findFirstByEndpointAndRuleTypeOrderByMarkedFixedAtDesc(
+                            finding.getEndpoint(), finding.getRuleType())
+                    : fixSnapshotRepository.findFirstByApplicationNameAndEndpointAndRuleTypeOrderByMarkedFixedAtDesc(
+                            applicationName, finding.getEndpoint(), finding.getRuleType());
+
+            snapshot.ifPresent(s -> finding.setReopenedInfo(new DiagnosisFinding.ReopenedInfo(
+                    s.getMarkedFixedAt().toString(), s.getNote())));
+        }
     }
 
     public List<DiagnosisFinding> getFindingsForEndpoint(String endpoint) {
@@ -258,7 +287,6 @@ public class DiagnosisService {
 
     private List<DiagnosisFinding> checkPerformanceRegression(String endpoint, List<Telemetry> records) {
         if (records.size() < MIN_BASELINE_SAMPLE_COUNT * 2) {
-            System.out.println("[REGRESSION-DEBUG] " + endpoint + ": SKIP - only " + records.size() + " total records, need >= " + (MIN_BASELINE_SAMPLE_COUNT * 2));
             return List.of();
         }
 
@@ -270,7 +298,6 @@ public class DiagnosisService {
 
         long totalSeconds = java.time.Duration.between(earliest, latest).getSeconds();
         if (totalSeconds < 120) {
-            System.out.println("[REGRESSION-DEBUG] " + endpoint + ": SKIP - only " + totalSeconds + " seconds of time spread across " + records.size() + " records, need >= 120");
             return List.of();
         }
         java.time.LocalDateTime midpoint = earliest.plusSeconds(totalSeconds / 2);
@@ -285,7 +312,6 @@ public class DiagnosisService {
         List<Long> baselineDurations = baselineRecords.stream().map(Telemetry::getDurationMs).collect(Collectors.toList());
 
         if (baselineDurations.size() < MIN_BASELINE_SAMPLE_COUNT || currentRecords.isEmpty()) {
-            System.out.println("[REGRESSION-DEBUG] " + endpoint + ": SKIP - baseline half has " + baselineDurations.size() + " samples (need >= " + MIN_BASELINE_SAMPLE_COUNT + "), current half has " + currentRecords.size() + ", totalSeconds=" + totalSeconds);
             return List.of();
         }
 
@@ -304,8 +330,6 @@ public class DiagnosisService {
         boolean isRegression = flatBaseline
                 ? ratio >= 1.5 && (currentMean - baselineMean) > 50
                 : zScore >= REGRESSION_Z_SCORE_THRESHOLD;
-
-        System.out.println(String.format("[REGRESSION-DEBUG] %s: baselineMean=%.0fms baselineStdDev=%.0fms baselineN=%d | currentMean=%.0fms currentN=%d | zScore=%.2f ratio=%.2f flatBaseline=%s totalSeconds=%d | FIRES=%s", endpoint, baselineMean, baselineStdDeviation, baselineDurations.size(), currentMean, currentRecords.size(), zScore, ratio, flatBaseline, totalSeconds, isRegression));
 
         if (!isRegression) {
             return List.of();

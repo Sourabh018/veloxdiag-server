@@ -52,6 +52,16 @@ public class FixSnapshot {
     private Double beforeMaxQueryCount;
     private Long beforeSampleCount;
 
+    // Standard deviation of duration at mark-time — the endpoint's natural
+    // noise level BEFORE the fix. Added after a real false-positive was
+    // caught in testing: a 45% "improvement" on /api/auth/register turned
+    // out to be smaller than the endpoint's own stdDev (1690ms), i.e. well
+    // within normal random swing for that endpoint, not a real change.
+    // Nullable so existing rows created before this field don't break —
+    // FixTrackingService falls back to the old (weaker) threshold-only
+    // logic when this is null.
+    private Double beforeStdDeviationMs;
+
     @Enumerated(EnumType.STRING)
     private Status status = Status.WATCHING;
 
@@ -60,7 +70,7 @@ public class FixSnapshot {
 
     public FixSnapshot(String applicationName, String endpoint, String ruleType, String note,
                         LocalDateTime markedFixedAt, Double beforeAvgDurationMs,
-                        Double beforeMaxQueryCount, Long beforeSampleCount) {
+                        Double beforeMaxQueryCount, Long beforeSampleCount, Double beforeStdDeviationMs) {
         this.applicationName = applicationName;
         this.endpoint = endpoint;
         this.ruleType = ruleType;
@@ -69,6 +79,7 @@ public class FixSnapshot {
         this.beforeAvgDurationMs = beforeAvgDurationMs;
         this.beforeMaxQueryCount = beforeMaxQueryCount;
         this.beforeSampleCount = beforeSampleCount;
+        this.beforeStdDeviationMs = beforeStdDeviationMs;
     }
 
     public Long getId() { return id; }
@@ -97,6 +108,9 @@ public class FixSnapshot {
 
     public Long getBeforeSampleCount() { return beforeSampleCount; }
     public void setBeforeSampleCount(Long beforeSampleCount) { this.beforeSampleCount = beforeSampleCount; }
+
+    public Double getBeforeStdDeviationMs() { return beforeStdDeviationMs; }
+    public void setBeforeStdDeviationMs(Double beforeStdDeviationMs) { this.beforeStdDeviationMs = beforeStdDeviationMs; }
 
     public Status getStatus() { return status; }
     public void setStatus(Status status) { this.status = status; }
