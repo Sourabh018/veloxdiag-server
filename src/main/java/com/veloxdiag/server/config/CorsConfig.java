@@ -19,7 +19,10 @@ public class CorsConfig implements WebMvcConfigurer {
                         "https://agromart-frontend-one.vercel.app",
                         "https://agromart-admin-red.vercel.app"
                 )
-                .allowedOriginPatterns("http://localhost:*")
+                .allowedOriginPatterns(
+                        "http://localhost:*",
+                        "https://veloxdiag-dashboard-*.vercel.app"
+                )
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                 .allowedHeaders("*")
                 .allowCredentials(true);
