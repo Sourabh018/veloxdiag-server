@@ -62,6 +62,28 @@ public class ApplicationController {
         return ResponseEntity.ok(apps);
     }
 
+    // Deletes only the Application row (registration + ingest key) — never
+    // touches Telemetry, which stores applicationName as a plain string with
+    // no FK back to this table (see Application.java javadoc on why name
+    // isn't even per-owner-scoped). Re-registering the same name afterward
+    // just picks the existing telemetry back up under a fresh key.
+    @DeleteMapping("/{name}")
+    public ResponseEntity<?> deleteApplication(@PathVariable String name) {
+        User current = CurrentUserContext.get();
+        if (current == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Login required.");
+        }
+        Application app = applicationRepository.findByName(name).orElse(null);
+        if (app == null) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("No such application.");
+        }
+        if (!app.getOwnerUserId().equals(current.getId())) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body("You do not own this application.");
+        }
+        applicationRepository.delete(app);
+        return ResponseEntity.noContent().build();
+    }
+
     public static class RegisterRequest {
         private String name;
         public String getName() { return name; }
