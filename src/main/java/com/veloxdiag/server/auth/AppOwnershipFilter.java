@@ -68,6 +68,19 @@ public class AppOwnershipFilter extends HttpFilter {
             }
         }
 
+        // CORS preflight never carries Authorization (browsers strip it per
+        // spec — only Access-Control-Request-Headers lists the name, not the
+        // value), so CurrentUserContext is always null here. Was harmless
+        // while every applicationName was unregistered (fell through the
+        // "not yet registered" branch below); the moment an app IS
+        // registered, this would 403 the preflight itself and the browser
+        // aborts the real request before it's even sent. OPTIONS never
+        // reaches a controller anyway — nothing to protect by checking it.
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            chain.doFilter(request, response);
+            return;
+        }
+
         String applicationName = request.getParameter("applicationName");
         if (applicationName == null || applicationName.isBlank()) {
             // No applicationName param on this request at all — nothing to
