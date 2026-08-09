@@ -34,12 +34,15 @@ public class DashboardService {
     private final TelemetryRepository telemetryRepository;
     private final TelemetryWindowSettings windowSettings;
     private final DiagnosisService diagnosisService;
+    private final com.veloxdiag.server.auth.ApplicationRepository applicationRepository;
 
     public DashboardService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings,
-                             DiagnosisService diagnosisService) {
+                             DiagnosisService diagnosisService,
+                             com.veloxdiag.server.auth.ApplicationRepository applicationRepository) {
         this.telemetryRepository = telemetryRepository;
         this.windowSettings = windowSettings;
         this.diagnosisService = diagnosisService;
+        this.applicationRepository = applicationRepository;
     }
 
     public DashboardSummary getSummary() {
@@ -70,9 +73,26 @@ public class DashboardService {
         );
     }
 
-    // Distinct application names seen in telemetry — populates the app-selector
-    // dropdown ("All Apps" is added client-side, not stored here).
+    // Scoped to the authenticated user's own registered applications (see
+    // Application registry, ApplicationController) — this is what makes the
+    // app-selector dropdown per-user instead of showing every application on
+    // the server. MIGRATION FALLBACK: if the current user has zero registered
+    // applications (e.g. before anyone has registered CET_CELL via
+    // POST /api/applications), falls back to the old "every distinct
+    // application name seen in telemetry" behavior — same reasoning as
+    // AppOwnershipFilter's backward-compatible default, so the dropdown isn't
+    // suddenly empty for everyone the moment this ships. Once real
+    // applications are registered, this returns only the current user's own.
     public List<String> getApplications() {
+        com.veloxdiag.server.auth.User current = com.veloxdiag.server.auth.CurrentUserContext.get();
+        if (current != null) {
+            List<String> owned = applicationRepository.findByOwnerUserId(current.getId()).stream()
+                    .map(com.veloxdiag.server.auth.Application::getName)
+                    .collect(Collectors.toList());
+            if (!owned.isEmpty()) {
+                return owned;
+            }
+        }
         return telemetryRepository.findDistinctApplicationNames();
     }
 

@@ -62,6 +62,16 @@
 			<artifactId>h2</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<!-- Password hashing for multi-tenancy (AuthController) — deliberately
+		     just spring-security-crypto, NOT the full spring-boot-starter-security.
+		     Keeps the existing plain-servlet-Filter auth style intact (see
+		     AuthFilter, DashboardAccessFilter, TelemetryIngestFilter) rather than
+		     pulling in Spring Security's filter chain / config style, which would
+		     mean rewriting every existing filter to fit its conventions instead. -->
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-crypto</artifactId>
+		</dependency>
 	</dependencies>
 
 	<build>
