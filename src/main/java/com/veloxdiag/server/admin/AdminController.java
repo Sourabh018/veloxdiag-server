@@ -47,4 +47,23 @@ public class AdminController {
         AdminService.AdminResetResult result = adminService.resetApplication(applicationName);
         return ResponseEntity.ok(result);
     }
+
+    // Wipes every Application registration across every user — the whole
+    // "who owns what app name" ledger, table-level. Real request data
+    // (Telemetry/SlowQueryPlan) is untouched — see AdminService.wipeAllApplications
+    // javadoc. Same shared-secret gate as the per-app reset above; same
+    // caveat applies (not real auth, fine for single-operator scale only).
+    @DeleteMapping("/api/admin/reset-all-applications")
+    public ResponseEntity<?> resetAllApplications(@RequestHeader(value = "X-Admin-Token", required = false) String providedToken) {
+        if (adminResetToken == null || adminResetToken.isBlank()) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body("Reset is disabled: ADMIN_RESET_TOKEN is not configured on the server.");
+        }
+        if (providedToken == null || !adminResetToken.equals(providedToken)) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid or missing admin token.");
+        }
+
+        int deleted = adminService.wipeAllApplications();
+        return ResponseEntity.ok(java.util.Map.of("applicationsDeleted", deleted));
+    }
 }
