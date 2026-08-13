@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.util.Optional;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,7 +29,10 @@ import jakarta.servlet.http.HttpServletResponse;
 //      fallback ONLY so already-deployed, not-yet-registered apps (CET_CELL)
 //      don't go dark mid-migration. Remove once every real app has been
 //      registered via POST /api/applications and switched to its own key.
+// Runs after IngestRateLimitFilter (see its @Order(1) + javadoc for why
+// IP-based rate limiting has to come first, not after key validation).
 @Component
+@Order(2)
 public class TelemetryIngestFilter extends HttpFilter {
 
     @Value("${telemetry.ingest-token:}")
