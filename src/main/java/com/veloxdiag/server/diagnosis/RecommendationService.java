@@ -333,8 +333,10 @@ public class RecommendationService {
             if (result != null && !result.isBlank()) {
                 return new RecommendationExplanation(endpoint, ruleType, result, true);
             }
+            System.out.println("[VeloxDiag] generateAiSuggestion: Groq returned null/blank for " + endpoint + "/" + ruleType + " — using fallback template.");
         } catch (Exception e) {
-            // fall through to fallback text below
+            System.out.println("[VeloxDiag] generateAiSuggestion FAILED for " + endpoint + "/" + ruleType
+                    + " — " + e.getClass().getSimpleName() + ": " + e.getMessage() + " — using fallback template.");
         }
 
         return new RecommendationExplanation(endpoint, ruleType, fallbackText, false);
@@ -440,7 +442,8 @@ public class RecommendationService {
                         parts[0] != null, relatedFindings);
             }
         } catch (Exception e) {
-            // fall through to generic
+            System.out.println("[VeloxDiag] buildIndexRecommendation Groq call FAILED for " + endpoint
+                    + " — " + e.getClass().getSimpleName() + ": " + e.getMessage() + " — using generic fallback.");
         }
 
         return new Recommendation(endpoint, finding.getSeverity(), finding.getRuleType(),

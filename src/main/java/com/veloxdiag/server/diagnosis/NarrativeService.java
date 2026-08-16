@@ -123,6 +123,8 @@ public class NarrativeService {
             String text = callGroq(SYSTEM_PROMPT, userPrompt, 0.7);
             return new EndpointNarrative(endpoint, text, ruleTypes);
         } catch (Exception e) {
+            System.out.println("[VeloxDiag] generateNarrative FAILED for " + endpoint + " — "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
             String msg = e instanceof IllegalStateException
                     ? "Narrative generation isn't configured (missing GROQ_API_KEY)."
                     : "Narrative generation failed: " + e.getMessage();

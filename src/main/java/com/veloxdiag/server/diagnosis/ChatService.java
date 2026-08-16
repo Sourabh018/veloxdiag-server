@@ -44,7 +44,9 @@ public class ChatService {
             "asked something the data can't show), say that plainly instead of guessing or inventing an " +
             "answer. Never invent an endpoint name, table name, or number that isn't present in the input. " +
             "Answer in 2-4 sentences, like a teammate answering directly in chat — no headers, no bullet " +
-            "points, no restating the question back.";
+            "points, no restating the question back. Vary your opening phrase across different questions " +
+            "rather than always starting the same way (e.g. don't begin every answer with 'Based on the " +
+            "data' or 'Looking at your findings').";
 
     private final DiagnosisService diagnosisService;
     private final DashboardService dashboardService;
@@ -79,6 +81,8 @@ public class ChatService {
             String result = callGroq(userPrompt);
             return Map.of("answer", result);
         } catch (Exception e) {
+            System.out.println("[VeloxDiag] ChatService.answerQuestion FAILED — "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
             return Map.of("answer", "Couldn't generate an answer — try again.");
         }
     }
