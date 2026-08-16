@@ -31,5 +31,12 @@ groq:
 admin:
   reset-token: ${ADMIN_RESET_TOKEN:}
 
-telemetry: 
+telemetry:
   ingest-token: ${TELEMETRY_INGEST_TOKEN:}
+
+# Self-monitoring — veloxdiag-server watching its own queries/performance
+# via veloxdiag-starter, same as any other connected app.
+veloxdiag:
+  applicationName: veloxdiag-server
+  serverUrl: ${VELOXDIAG_SELF_URL:https://veloxdiag-server.onrender.com}
+  apiKey: ${VELOXDIAG_SELF_API_KEY:Mwj3TRoAjy1weH_9IhtlRi4PdvGaMqJ4}
