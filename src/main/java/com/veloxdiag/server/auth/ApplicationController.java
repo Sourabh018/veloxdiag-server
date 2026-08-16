@@ -109,6 +109,46 @@ public class ApplicationController {
         return ResponseEntity.noContent().build();
     }
 
+    // Same ownership check as deleteApplication, but keeps the Application
+    // row (registration + ingest key) — only wipes this app's Telemetry and
+    // SlowQueryPlan rows. This is the self-service reset every logged-in
+    // owner can do on their own app; AdminController's reset-application
+    // endpoint stays as the separate operator-only override (works even if
+    // the caller isn't the owner, gated by ADMIN_RESET_TOKEN instead of
+    // login) — the two are intentionally independent paths to the same
+    // underlying AdminService.resetApplication.
+    @DeleteMapping("/{name}/data")
+    public ResponseEntity<?> resetApplicationData(@PathVariable String name) {
+        User current = CurrentUserContext.get();
+        if (current == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Login required.");
+        }
+        Application app = applicationRepository.findByName(name).orElse(null);
+        if (app == null) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("No such application.");
+        }
+        if (!app.getOwnerUserId().equals(current.getId())) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body("You do not own this application.");
+        }
+        int telemetryDeleted = telemetryRepository.deleteByApplicationName(name);
+        int plansDeleted = slowQueryPlanRepository.deleteByApplicationName(name);
+        return ResponseEntity.ok(new ResetResult(name, telemetryDeleted, plansDeleted));
+    }
+
+    public static class ResetResult {
+        private String applicationName;
+        private int telemetryRowsDeleted;
+        private int slowQueryPlanRowsDeleted;
+        public ResetResult(String applicationName, int telemetryRowsDeleted, int slowQueryPlanRowsDeleted) {
+            this.applicationName = applicationName;
+            this.telemetryRowsDeleted = telemetryRowsDeleted;
+            this.slowQueryPlanRowsDeleted = slowQueryPlanRowsDeleted;
+        }
+        public String getApplicationName() { return applicationName; }
+        public int getTelemetryRowsDeleted() { return telemetryRowsDeleted; }
+        public int getSlowQueryPlanRowsDeleted() { return slowQueryPlanRowsDeleted; }
+    }
+
     public static class RegisterRequest {
         private String name;
         public String getName() { return name; }
