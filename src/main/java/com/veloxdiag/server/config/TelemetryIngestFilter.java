@@ -18,7 +18,8 @@ import jakarta.servlet.http.HttpFilter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
-// Guards the two open ingestion endpoints (/api/telemetry, /api/slow-query-plans).
+// Guards the open ingestion endpoints (/api/telemetry, /api/slow-query-plans,
+// /api/jvm-metrics).
 // Two accepted forms of X-API-KEY, checked in order:
 //   1. Per-app key (Application.ingestApiKey, see ApplicationController) — the
 //      real mechanism now that multi-tenancy exists. The key must belong to a
@@ -50,7 +51,8 @@ public class TelemetryIngestFilter extends HttpFilter {
             throws IOException, ServletException {
 
         String path = request.getRequestURI();
-        boolean isIngestPath = path.equals("/api/telemetry") || path.equals("/api/slow-query-plans");
+        boolean isIngestPath = path.equals("/api/telemetry") || path.equals("/api/slow-query-plans")
+                || path.equals("/api/jvm-metrics");
 
         if (!isIngestPath || !"POST".equalsIgnoreCase(request.getMethod())) {
             chain.doFilter(request, response);
