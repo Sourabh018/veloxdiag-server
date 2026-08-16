@@ -88,7 +88,7 @@ class DiagnosisServiceTest {
 
     private List<DiagnosisFinding> runFor(List<Telemetry> records) {
         when(telemetryRepository.findByTimestampAfter(any())).thenReturn(records);
-        return diagnosisService.getFindingsForEndpoint(ENDPOINT);
+        return diagnosisService.getFindingsForEndpoint(ENDPOINT, null);
     }
 
     private Optional<DiagnosisFinding> find(List<DiagnosisFinding> findings, String ruleType) {

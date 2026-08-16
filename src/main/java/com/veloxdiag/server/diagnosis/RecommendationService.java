@@ -292,8 +292,8 @@ public class RecommendationService {
      * static template text (via buildRecommendation) if the key pool is empty,
      * the finding can't be found, or the call fails — never blocks the UI.
      */
-    public RecommendationExplanation generateAiSuggestion(String endpoint, String ruleType) {
-        List<DiagnosisFinding> findings = diagnosisService.getFindingsForEndpoint(endpoint);
+    public RecommendationExplanation generateAiSuggestion(String endpoint, String ruleType, String applicationName) {
+        List<DiagnosisFinding> findings = diagnosisService.getFindingsForEndpoint(endpoint, applicationName);
         DiagnosisFinding finding = findings.stream()
                 .filter(f -> f.getRuleType().equals(ruleType))
                 .findFirst()

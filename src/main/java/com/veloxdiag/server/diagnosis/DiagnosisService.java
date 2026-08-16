@@ -215,9 +215,12 @@ public class DiagnosisService {
         }
     }
 
-    public List<DiagnosisFinding> getFindingsForEndpoint(String endpoint) {
-        LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays(null));
-        List<Telemetry> records = telemetryRepository.findByTimestampAfter(cutoff).stream()
+    public List<DiagnosisFinding> getFindingsForEndpoint(String endpoint, String applicationName) {
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays(applicationName));
+        List<Telemetry> raw = (applicationName == null || applicationName.isBlank())
+                ? telemetryRepository.findByTimestampAfter(cutoff)
+                : telemetryRepository.findByApplicationNameAndTimestampAfter(applicationName, cutoff);
+        List<Telemetry> records = raw.stream()
                 .filter(t -> endpoint.equals(EndpointNormalizer.normalize(t.getEndpoint())))
                 .collect(Collectors.toList());
 

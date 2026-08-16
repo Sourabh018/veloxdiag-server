@@ -60,8 +60,12 @@ public class SlowQueryPlanController {
     // shows whatever was actually captured so the user sees real evidence,
     // including cases where the plan turned out fine.
     @GetMapping
-    public List<SlowQueryPlan> getRecentPlans(@RequestParam String endpoint) {
-        return slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
+    public List<SlowQueryPlan> getRecentPlans(@RequestParam String endpoint,
+                                               @RequestParam(required = false) String applicationName) {
+        if (applicationName == null || applicationName.isBlank()) {
+            return slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
+        }
+        return slowQueryPlanRepository.findTop3ByApplicationNameAndEndpointOrderByTimestampDesc(applicationName, endpoint);
     }
 
     // AI wow feature #1 (Slow Queries page): on-demand, one plan at a time —

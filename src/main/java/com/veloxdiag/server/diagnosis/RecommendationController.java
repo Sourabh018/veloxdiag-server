@@ -33,7 +33,8 @@ public class RecommendationController {
     // several active findings at once.
     @GetMapping("/explain")
     public RecommendationExplanation explainRecommendation(@RequestParam String endpoint,
-                                                             @RequestParam String ruleType) {
-        return recommendationService.generateAiSuggestion(endpoint, ruleType);
+                                                             @RequestParam String ruleType,
+                                                             @RequestParam(required = false) String applicationName) {
+        return recommendationService.generateAiSuggestion(endpoint, ruleType, applicationName);
     }
 }

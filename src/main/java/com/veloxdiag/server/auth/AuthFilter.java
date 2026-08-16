@@ -41,7 +41,20 @@ public class AuthFilter extends HttpFilter {
             String header = request.getHeader("Authorization");
             if (header != null && header.startsWith("Bearer ")) {
                 String token = header.substring("Bearer ".length()).trim();
-                userRepository.findBySessionToken(token).ifPresent(CurrentUserContext::set);
+                userRepository.findBySessionToken(token).ifPresent(user -> {
+                    // Expired token = treated as no token at all (not an
+                    // error here — this filter never rejects, it just leaves
+                    // CurrentUserContext unset, same as a missing/garbage
+                    // token). Any endpoint that actually requires auth (e.g.
+                    // AppOwnershipFilter) sees no user and rejects normally.
+                    // The row/token itself isn't deleted or cleared here —
+                    // next login just overwrites it, and this keeps the
+                    // filter read-only/side-effect-free.
+                    java.time.LocalDateTime expiresAt = user.getSessionTokenExpiresAt();
+                    if (expiresAt == null || expiresAt.isAfter(java.time.LocalDateTime.now())) {
+                        CurrentUserContext.set(user);
+                    }
+                });
             }
             chain.doFilter(request, response);
         } finally {

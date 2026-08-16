@@ -26,6 +26,11 @@ public interface SlowQueryPlanRepository extends JpaRepository<SlowQueryPlan, Lo
     // demand rather than only the flagged ones.
     List<SlowQueryPlan> findTop3ByEndpointOrderByTimestampDesc(String endpoint);
 
+    // Same as above, scoped to one application — prevents cross-app plan
+    // leakage when two apps happen to share a normalized endpoint string
+    // (e.g. both expose "/api/users/{id}").
+    List<SlowQueryPlan> findTop3ByApplicationNameAndEndpointOrderByTimestampDesc(String applicationName, String endpoint);
+
     // Full seq-scan history for one endpoint, oldest first — used by
     // DataGrowthService to compare the earliest captured row estimate for a
     // table against the most recent one, to detect "this table has grown,

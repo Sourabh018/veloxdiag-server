@@ -22,13 +22,19 @@ import java.util.Optional;
  * - No email verification — anyone can register with any email string.
  * - No password reset flow — a lost password currently means a manual DB fix.
  * - No rate limiting on login attempts.
- * - Session token has no expiry (see User.sessionToken javadoc).
  * These are real gaps for a production multi-user product; acceptable for
  * validating the core "isolated per-user dashboards" mechanism first.
  */
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
+
+    // How long a session token stays valid after login/register. 24h is a
+    // reasonable default for this scope — long enough not to be annoying,
+    // short enough that a leaked token doesn't stay live indefinitely. Not
+    // externalized to application.yml yet since nothing else about this
+    // filter chain is configurable either; revisit if that changes.
+    private static final long TOKEN_TTL_HOURS = 24;
 
     private final UserRepository userRepository;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
@@ -50,6 +56,7 @@ public class AuthController {
 
         User user = new User(request.getEmail(), passwordEncoder.encode(request.getPassword()));
         user.setSessionToken(generateToken());
+        user.setSessionTokenExpiresAt(java.time.LocalDateTime.now().plusHours(TOKEN_TTL_HOURS));
         userRepository.save(user);
 
         return ResponseEntity.ok(new AuthResponse(user.getSessionToken(), user.getEmail()));
@@ -66,6 +73,7 @@ public class AuthController {
         // Regenerating on every login is deliberate — see User.sessionToken
         // javadoc: this is a real, documented "one active session" tradeoff.
         user.setSessionToken(generateToken());
+        user.setSessionTokenExpiresAt(java.time.LocalDateTime.now().plusHours(TOKEN_TTL_HOURS));
         userRepository.save(user);
 
         return ResponseEntity.ok(new AuthResponse(user.getSessionToken(), user.getEmail()));
@@ -76,6 +84,7 @@ public class AuthController {
         User current = CurrentUserContext.get();
         if (current != null) {
             current.setSessionToken(null);
+            current.setSessionTokenExpiresAt(null);
             userRepository.save(current);
         }
         return ResponseEntity.ok().build();

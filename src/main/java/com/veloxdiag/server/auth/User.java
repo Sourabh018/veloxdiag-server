@@ -17,9 +17,12 @@ import jakarta.persistence.UniqueConstraint;
  *
  * sessionToken is a deliberately simple approach for this scope: a single
  * opaque token stored directly on the row, replaced on every login, cleared
- * on logout. No expiry, no refresh tokens, no multi-device session list.
- * That's a real, documented limitation (see AuthController javadoc) — fine
- * for a small number of real users, not a JWT/OAuth-grade session system.
+ * on logout. No refresh tokens, no multi-device session list — still a real,
+ * documented limitation (see AuthController javadoc). sessionTokenExpiresAt
+ * closes the "tokens live forever" gap specifically: AuthFilter treats an
+ * expired token the same as no token at all, without deleting the row, so a
+ * user who returns after expiry just gets a clean re-login rather than a
+ * confusing partial-auth state.
  */
 @Entity
 @Table(name = "app_user", uniqueConstraints = @UniqueConstraint(columnNames = "email"))
@@ -43,6 +46,13 @@ public class User {
     @Column(unique = true, length = 100)
     private String sessionToken;
 
+    // Null when there's no active session (logged out, or never logged in).
+    // Set to now + TOKEN_TTL on every login/register, alongside a fresh
+    // sessionToken — see AuthController. Checked in AuthFilter on every
+    // authenticated request.
+    @Column
+    private java.time.LocalDateTime sessionTokenExpiresAt;
+
     public User() {
     }
 
@@ -62,4 +72,7 @@ public class User {
 
     public String getSessionToken() { return sessionToken; }
     public void setSessionToken(String sessionToken) { this.sessionToken = sessionToken; }
+
+    public java.time.LocalDateTime getSessionTokenExpiresAt() { return sessionTokenExpiresAt; }
+    public void setSessionTokenExpiresAt(java.time.LocalDateTime sessionTokenExpiresAt) { this.sessionTokenExpiresAt = sessionTokenExpiresAt; }
 }
