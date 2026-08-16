@@ -40,3 +40,14 @@ veloxdiag:
   applicationName: veloxdiag-server
   serverUrl: ${VELOXDIAG_SELF_URL:https://veloxdiag-server.onrender.com}
   apiKey: ${VELOXDIAG_SELF_API_KEY:Mwj3TRoAjy1weH_9IhtlRi4PdvGaMqJ4}
+  excluded-paths:
+    # Ingest endpoint itself — without this, every telemetry POST is a
+    # request that gets telemetry-tracked, which sends another telemetry
+    # POST, which gets tracked, forever (the 429/TaskRejectedException loop).
+    - /api/telemetry
+    - /api/slow-query-plans
+    # Dashboard/auth traffic isn't meaningful "app performance" data anyway.
+    - /api/dashboard/**
+    - /api/auth/**
+    - /api/applications/**
+    - /actuator/**
