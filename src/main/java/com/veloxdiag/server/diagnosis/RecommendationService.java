@@ -166,15 +166,25 @@ public class RecommendationService {
         String avgQueryCount = evString(ev, "averageQueryCount");
         String maxQueryCount = evString(ev, "maxQueryCount");
 
+        // Try to name a real table instead of the generic "Entity"/"related
+        // entity" placeholder — same captured-SQL source buildIndexRecommendation
+        // already uses, just not previously wired in here. Best-effort only:
+        // a captured plan may not exist for every N+1 endpoint (plans are
+        // captured on slow queries, not specifically on N+1 detections), so
+        // this silently falls back to the honest generic wording below when
+        // nothing real is available — never fabricates a name.
+        String realTable = findRealTableName(endpoint);
+
         String detail;
         if (sampleCount != null && avgQueryCount != null && maxQueryCount != null) {
             detail = String.format(
                     "Across %s sampled requests, this endpoint averaged %s SQL queries and spiked to a maximum " +
-                    "of %s in at least one call — the classic N+1 shape. In JPA/Hibernate, fix it with a " +
-                    "JOIN FETCH in the repository query, an @EntityGraph on the method, or a batch-fetch-size " +
-                    "hint — whichever fits the actual relationship being loaded. VeloxDiag doesn't know the " +
-                    "exact entity, so verify against the repository method backing this endpoint before applying.",
-                    sampleCount, avgQueryCount, maxQueryCount);
+                    "of %s in at least one call — the classic N+1 shape. %s" +
+                    "In JPA/Hibernate, fix it with a JOIN FETCH in the repository query, an @EntityGraph on the " +
+                    "method, or a batch-fetch-size hint — whichever fits the actual relationship being loaded.%s",
+                    sampleCount, avgQueryCount, maxQueryCount,
+                    realTable != null ? "A recently captured query on this endpoint touches the " + realTable + " table, so that's the likely target. " : "",
+                    realTable != null ? " Verify the exact repository method before applying." : " VeloxDiag doesn't know the exact entity, so verify against the repository method backing this endpoint before applying.");
         } else {
             detail = "This endpoint issues a growing number of near-identical queries per request, the " +
                     "classic N+1 shape. In JPA/Hibernate, fix it with a JOIN FETCH in the repository query, " +
@@ -183,15 +193,53 @@ public class RecommendationService {
                     "the repository method backing this endpoint before applying.";
         }
 
+        String codeExample = realTable != null
+                ? "// Example — replace the per-row lookup with a single fetch join on " + realTable + ":\n" +
+                  "@Query(\"SELECT e FROM " + toEntityGuess(realTable) + " e JOIN FETCH e.relatedEntity WHERE ...\")\n" +
+                  "// (entity/field names above are a guess from the table name — confirm against your actual mapping)"
+                : "// Example — replace the per-row lookup with a single fetch join:\n" +
+                  "@Query(\"SELECT e FROM Entity e JOIN FETCH e.relatedEntity WHERE ...\")";
+
         return new Recommendation(
                 endpoint, finding.getSeverity(), finding.getRuleType(),
                 "Batch or eager-fetch the related entity instead of querying per row",
                 detail,
                 finding.getEvidence(),
-                "// Example — replace the per-row lookup with a single fetch join:\n" +
-                "@Query(\"SELECT e FROM Entity e JOIN FETCH e.relatedEntity WHERE ...\")",
+                codeExample,
                 false, relatedFindings
         );
+    }
+
+    // Best-effort real table name from the most recent captured SlowQueryPlan
+    // for this endpoint. Simple regex on FROM/JOIN — good enough to surface a
+    // real name for the common case, not a full SQL parser. Returns null
+    // (never a guess) if no plan is captured or no table name is extractable.
+    private String findRealTableName(String endpoint) {
+        List<SlowQueryPlan> plans = slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
+        if (plans == null) return null;
+        for (SlowQueryPlan plan : plans) {
+            if (plan.getSqlText() == null) continue;
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("(?i)\\bfrom\\s+([a-zA-Z_][a-zA-Z0-9_]*)")
+                    .matcher(plan.getSqlText());
+            if (m.find()) {
+                return m.group(1);
+            }
+        }
+        return null;
+    }
+
+    // Rough snake_case-table -> PascalCase-entity guess (e.g. exam_questions
+    // -> ExamQuestions) purely for the illustrative code snippet — explicitly
+    // labeled "a guess" in the comment above it so it never reads as a
+    // confirmed fact about the real codebase.
+    private String toEntityGuess(String tableName) {
+        StringBuilder sb = new StringBuilder();
+        for (String part : tableName.split("_")) {
+            if (part.isEmpty()) continue;
+            sb.append(Character.toUpperCase(part.charAt(0))).append(part.substring(1));
+        }
+        return sb.length() > 0 ? sb.toString() : tableName;
     }
 
     private Recommendation buildSlowRequestRecommendation(String endpoint, DiagnosisFinding finding, List<String> relatedFindings) {

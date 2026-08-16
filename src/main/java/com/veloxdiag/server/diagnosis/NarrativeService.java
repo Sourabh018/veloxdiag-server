@@ -13,7 +13,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -88,6 +91,32 @@ public class NarrativeService {
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
+    // Short-TTL cache keyed on (applicationName, endpoint, sorted rule-type
+    // signature). Fixes a real observed problem: the dashboard renders one
+    // finding-card per rule type on an endpoint, and each card independently
+    // re-requests /api/diagnosis/narrative for the SAME endpoint — since
+    // generateNarrative() already takes ALL findings for that endpoint in
+    // one call, those repeat requests were identical in substance, just
+    // burning through the Groq TPM quota (see the 429s in prod logs) and
+    // producing near-duplicate "primary driver..." paragraphs under every
+    // card. Caching the endpoint-level result for a few minutes means the
+    // first card's request pays for the Groq call, the rest reuse it —
+    // cutting both the token burn and the duplicate-text symptom without
+    // needing a frontend change. Findings-signature is part of the key so a
+    // genuinely new finding (not just a repeat request) still gets a fresh
+    // narrative rather than serving stale text.
+    private static final long CACHE_TTL_SECONDS = 180;
+    private final Map<String, CachedNarrative> narrativeCache = new ConcurrentHashMap<>();
+
+    private static final class CachedNarrative {
+        final EndpointNarrative narrative;
+        final Instant expiresAt;
+        CachedNarrative(EndpointNarrative narrative, Instant expiresAt) {
+            this.narrative = narrative;
+            this.expiresAt = expiresAt;
+        }
+    }
+
     public NarrativeService(GeminiKeyRotator keyRotator, SlowQueryPlanRepository slowQueryPlanRepository,
                              EndpointBusinessContextRepository businessContextRepository,
                              DataGrowthService dataGrowthService) {
@@ -118,10 +147,18 @@ public class NarrativeService {
                     ruleTypes);
         }
 
+        String cacheKey = buildCacheKey(applicationName, endpoint, ruleTypes);
+        CachedNarrative cached = narrativeCache.get(cacheKey);
+        if (cached != null && cached.expiresAt.isAfter(Instant.now())) {
+            return cached.narrative;
+        }
+
         String userPrompt = buildFindingsBlock(endpoint, findings, applicationName);
         try {
             String text = callGroq(SYSTEM_PROMPT, userPrompt, 0.7);
-            return new EndpointNarrative(endpoint, text, ruleTypes);
+            EndpointNarrative result = new EndpointNarrative(endpoint, text, ruleTypes);
+            narrativeCache.put(cacheKey, new CachedNarrative(result, Instant.now().plusSeconds(CACHE_TTL_SECONDS)));
+            return result;
         } catch (Exception e) {
             System.out.println("[VeloxDiag] generateNarrative FAILED for " + endpoint + " — "
                     + e.getClass().getSimpleName() + ": " + e.getMessage());
@@ -244,6 +281,12 @@ public class NarrativeService {
             if (shown >= 2) break; // cap at 2 — enough real evidence without bloating the prompt
         }
         return shown > 0 ? sb.toString() : null;
+    }
+
+    private String buildCacheKey(String applicationName, String endpoint, List<String> ruleTypes) {
+        String app = applicationName == null ? "" : applicationName;
+        String signature = ruleTypes.stream().sorted().collect(Collectors.joining(","));
+        return app + "::" + endpoint + "::" + signature;
     }
 
     private String truncate(String s, int maxLen) {
