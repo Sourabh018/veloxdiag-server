@@ -1,6 +1,7 @@
 package com.veloxdiag.server.admin;
 
 import com.veloxdiag.server.auth.ApplicationRepository;
+import com.veloxdiag.server.repository.ConnectionPoolMetricsRepository;
 import com.veloxdiag.server.repository.JvmMetricsRepository;
 import com.veloxdiag.server.repository.SlowQueryPlanRepository;
 import com.veloxdiag.server.repository.TelemetryRepository;
@@ -13,38 +14,30 @@ public class AdminService {
     private final SlowQueryPlanRepository slowQueryPlanRepository;
     private final ApplicationRepository applicationRepository;
     private final JvmMetricsRepository jvmMetricsRepository;
+    private final ConnectionPoolMetricsRepository connectionPoolMetricsRepository;
 
     public AdminService(TelemetryRepository telemetryRepository,
                          SlowQueryPlanRepository slowQueryPlanRepository,
                          ApplicationRepository applicationRepository,
-                         JvmMetricsRepository jvmMetricsRepository) {
+                         JvmMetricsRepository jvmMetricsRepository,
+                         ConnectionPoolMetricsRepository connectionPoolMetricsRepository) {
         this.telemetryRepository = telemetryRepository;
         this.slowQueryPlanRepository = slowQueryPlanRepository;
         this.applicationRepository = applicationRepository;
         this.jvmMetricsRepository = jvmMetricsRepository;
+        this.connectionPoolMetricsRepository = connectionPoolMetricsRepository;
     }
 
-    // Clears telemetry, slow_query_plans, and jvm_metrics for one
-    // application, scoped so a reset never touches another monitored app's
-    // data. Deliberately does NOT touch rule_definitions (shared config,
-    // not per-app data) or any other application's rows.
     public AdminResetResult resetApplication(String applicationName) {
         int telemetryDeleted = telemetryRepository.deleteByApplicationName(applicationName);
         int plansDeleted = slowQueryPlanRepository.deleteByApplicationName(applicationName);
         jvmMetricsRepository.deleteByApplicationName(applicationName);
+        connectionPoolMetricsRepository.deleteByApplicationName(applicationName);
         return new AdminResetResult(applicationName, telemetryDeleted, plansDeleted);
     }
 
     public record AdminResetResult(String applicationName, int telemetryRowsDeleted, int slowQueryPlanRowsDeleted) {}
 
-    // Wipes every row in the Application table — every registration, every
-    // owner, every ingest key — across ALL users, not scoped to one caller
-    // like ApplicationController.deleteApplication is. Does NOT touch
-    // Telemetry/SlowQueryPlan (real request data is untouched; this only
-    // clears the "who registered/owns what name" ledger sitting on top of
-    // it), and does NOT touch the User table (accounts/logins survive).
-    // One-shot recovery tool for dev/test cleanup — not something a normal
-    // dashboard flow should ever call.
     public int wipeAllApplications() {
         long count = applicationRepository.count();
         applicationRepository.deleteAll();

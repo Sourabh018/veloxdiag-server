@@ -52,7 +52,7 @@ public class TelemetryIngestFilter extends HttpFilter {
 
         String path = request.getRequestURI();
         boolean isIngestPath = path.equals("/api/telemetry") || path.equals("/api/slow-query-plans")
-                || path.equals("/api/jvm-metrics");
+                || path.equals("/api/jvm-metrics") || path.equals("/api/connection-pool-metrics");
 
         if (!isIngestPath || !"POST".equalsIgnoreCase(request.getMethod())) {
             chain.doFilter(request, response);
