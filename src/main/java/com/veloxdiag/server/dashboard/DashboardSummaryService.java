@@ -38,7 +38,7 @@ import java.util.stream.Collectors;
 @Service
 public class DashboardSummaryService {
 
-    private static final String MODEL = "llama-3.3-70b-versatile"; // confirm still current on Groq's model list before deploying
+    private static final String MODEL = "openai/gpt-oss-120b"; // migrated off llama-3.3-70b-versatile — Groq deprecated it (announced Jun 17, 2026)
     private static final String API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
     private static final String SYSTEM_PROMPT =
