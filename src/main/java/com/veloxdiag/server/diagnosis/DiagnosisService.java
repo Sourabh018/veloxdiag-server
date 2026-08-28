@@ -174,7 +174,7 @@ public class DiagnosisService {
     }
 
     private List<DiagnosisFinding> computeEndpointFindings(String endpoint, List<Telemetry> records,
-                                                             LocalDateTime cutoff) {
+                                                             LocalDateTime cutoff, String applicationName) {
         Thresholds thresholds = resolveThresholds(null);
         List<DiagnosisFinding> endpointFindings = new ArrayList<>();
         endpointFindings.addAll(checkSlowRequest(endpoint, records, thresholds));
@@ -187,7 +187,7 @@ public class DiagnosisService {
         List<DiagnosisFinding> combined = new ArrayList<>(endpointFindings);
         combined.addAll(correlateFindings(endpoint, records, endpointFindings, thresholds));
         combined.addAll(ruleEngineService.evaluate(endpoint, records));
-        attachRegressionWatch(null, combined);
+        attachRegressionWatch(applicationName, combined);
 
         return combined;
     }
@@ -224,7 +224,7 @@ public class DiagnosisService {
                 .filter(t -> endpoint.equals(EndpointNormalizer.normalize(t.getEndpoint())))
                 .collect(Collectors.toList());
 
-        return computeEndpointFindings(endpoint, records, cutoff);
+        return computeEndpointFindings(endpoint, records, cutoff, applicationName);
     }
 
     private static double stdDev(List<Long> values, double mean) {
