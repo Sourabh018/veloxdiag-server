@@ -19,6 +19,27 @@ public class DiagnosisService {
 
     static final String DEFAULT_KEY = "__default__";
 
+    // Findings are returned worst-first: HIGH severity before MEDIUM before LOW,
+    // and within the same severity, HIGH confidence before MEDIUM before LOW.
+    // Unknown/missing severity or confidence values (e.g. confidence is null for
+    // most non-correlation findings) sort last within their tier rather than
+    // throwing or floating to the top.
+    private static final Map<String, Integer> SEVERITY_RANK = Map.of("HIGH", 0, "MEDIUM", 1, "LOW", 2);
+    private static final Map<String, Integer> CONFIDENCE_RANK = Map.of("HIGH", 0, "MEDIUM", 1, "LOW", 2);
+    private static final int UNKNOWN_RANK = 3;
+
+    private static int severityRank(DiagnosisFinding f) {
+        return SEVERITY_RANK.getOrDefault(f.getSeverity(), UNKNOWN_RANK);
+    }
+
+    private static int confidenceRank(DiagnosisFinding f) {
+        return CONFIDENCE_RANK.getOrDefault(f.getConfidence(), UNKNOWN_RANK);
+    }
+
+    private static final Comparator<DiagnosisFinding> BY_SEVERITY_THEN_CONFIDENCE =
+            Comparator.comparingInt(DiagnosisService::severityRank)
+                    .thenComparingInt(DiagnosisService::confidenceRank);
+
     private static class Thresholds {
         final double slowRequestThresholdMs;
         final long highErrorRateThreshold;
@@ -150,6 +171,7 @@ public class DiagnosisService {
             findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, rules, thresholds, applicationName));
         }
 
+        findings.sort(BY_SEVERITY_THEN_CONFIDENCE);
         return findings;
     }
 
@@ -224,7 +246,9 @@ public class DiagnosisService {
                 .filter(t -> endpoint.equals(EndpointNormalizer.normalize(t.getEndpoint())))
                 .collect(Collectors.toList());
 
-        return computeEndpointFindings(endpoint, records, cutoff, applicationName);
+        List<DiagnosisFinding> findings = computeEndpointFindings(endpoint, records, cutoff, applicationName);
+        findings.sort(BY_SEVERITY_THEN_CONFIDENCE);
+        return findings;
     }
 
     private static double stdDev(List<Long> values, double mean) {
