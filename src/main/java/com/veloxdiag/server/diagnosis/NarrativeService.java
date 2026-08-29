@@ -21,7 +21,7 @@ import java.util.stream.Collectors;
 
 /**
  * LLM provider: Groq (OpenAI-compatible chat completions API), swapped in
- * from Gemini after the Gemini key pool ran out. GeminiKeyRotator is reused
+ * from Gemini after the Gemini key pool ran out. ApiKeyRotator is reused
  * as-is — it's just a generic key list + rotation, provider-agnostic — only
  * the HTTP call shape changed: Bearer auth header instead of ?key= query
  * param, a messages[] array (system + user) instead of contents[]/parts[],
@@ -84,7 +84,7 @@ public class NarrativeService {
             "scan appears on a large/likely-large table, say so plainly (e.g. 'scans the whole " +
             "exam_questions table'). No hedging, no markdown.";
 
-    private final GeminiKeyRotator keyRotator;
+    private final ApiKeyRotator keyRotator;
     private final SlowQueryPlanRepository slowQueryPlanRepository;
     private final DataGrowthService dataGrowthService;
     private final HttpClient httpClient;
@@ -116,7 +116,7 @@ public class NarrativeService {
         }
     }
 
-    public NarrativeService(GeminiKeyRotator keyRotator, SlowQueryPlanRepository slowQueryPlanRepository,
+    public NarrativeService(ApiKeyRotator keyRotator, SlowQueryPlanRepository slowQueryPlanRepository,
                              DataGrowthService dataGrowthService) {
         this.keyRotator = keyRotator;
         this.slowQueryPlanRepository = slowQueryPlanRepository;
