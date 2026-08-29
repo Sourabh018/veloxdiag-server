@@ -75,6 +75,7 @@ public class DiagnosisService {
     private final RuleEngineService ruleEngineService;
     private final SlowQueryPlanRepository slowQueryPlanRepository;
     private final FixSnapshotRepository fixSnapshotRepository;
+    private final DismissedFindingService dismissedFindingService;
 
     private static final Pattern SEQ_SCAN_PATTERN = Pattern.compile(
             "Seq Scan on (\\w+)(?:\\s+\\w+)?\\s*\\(cost=[\\d.]+\\.\\.[\\d.]+ rows=(\\d+)"
@@ -82,12 +83,13 @@ public class DiagnosisService {
 
     public DiagnosisService(TelemetryRepository telemetryRepository, TelemetryWindowSettings windowSettings,
                              RuleEngineService ruleEngineService, SlowQueryPlanRepository slowQueryPlanRepository,
-                             FixSnapshotRepository fixSnapshotRepository) {
+                             FixSnapshotRepository fixSnapshotRepository, DismissedFindingService dismissedFindingService) {
         this.telemetryRepository = telemetryRepository;
         this.windowSettings = windowSettings;
         this.ruleEngineService = ruleEngineService;
         this.slowQueryPlanRepository = slowQueryPlanRepository;
         this.fixSnapshotRepository = fixSnapshotRepository;
+        this.dismissedFindingService = dismissedFindingService;
         thresholdsByApp.put(DEFAULT_KEY, new Thresholds(1000.0, 3, 500, 15, 500));
     }
 
@@ -161,6 +163,9 @@ public class DiagnosisService {
         List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules =
                 ruleEngineService.loadEnabledRules();
 
+        Map<String, DismissedFinding> dismissedFingerprints =
+                dismissedFindingService.getDismissedFingerprints(applicationName);
+
         Map<String, List<SlowQueryPlan>> plansByEndpoint = slowQueryPlanRepository
                 .findByContainsSeqScanTrueAndTimestampAfter(cutoff).stream()
                 .collect(Collectors.groupingBy(p -> EndpointNormalizer.normalize(p.getEndpoint())));
@@ -168,7 +173,8 @@ public class DiagnosisService {
         for (Map.Entry<String, List<Telemetry>> entry : byEndpoint.entrySet()) {
             String endpoint = entry.getKey();
             List<SlowQueryPlan> plansForEndpoint = plansByEndpoint.getOrDefault(endpoint, List.of());
-            findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, rules, thresholds, applicationName));
+            findings.addAll(computeEndpointFindings(endpoint, entry.getValue(), plansForEndpoint, rules, thresholds,
+                    applicationName, dismissedFingerprints));
         }
 
         findings.sort(BY_SEVERITY_THEN_CONFIDENCE);
@@ -178,7 +184,7 @@ public class DiagnosisService {
     private List<DiagnosisFinding> computeEndpointFindings(
             String endpoint, List<Telemetry> records, List<SlowQueryPlan> seqScanPlans,
             List<com.veloxdiag.server.diagnosis.engine.RuleDefinitionEntity> rules, Thresholds thresholds,
-            String applicationName) {
+            String applicationName, Map<String, DismissedFinding> dismissedFingerprints) {
         List<DiagnosisFinding> endpointFindings = new ArrayList<>();
         endpointFindings.addAll(checkSlowRequest(endpoint, records, thresholds));
         endpointFindings.addAll(checkHighErrorRate(endpoint, records, thresholds));
@@ -191,6 +197,7 @@ public class DiagnosisService {
         combined.addAll(correlateFindings(endpoint, records, endpointFindings, thresholds));
         combined.addAll(ruleEngineService.evaluate(endpoint, records, rules));
         attachRegressionWatch(applicationName, combined);
+        attachDismissed(combined, dismissedFingerprints);
 
         return combined;
     }
@@ -198,6 +205,8 @@ public class DiagnosisService {
     private List<DiagnosisFinding> computeEndpointFindings(String endpoint, List<Telemetry> records,
                                                              LocalDateTime cutoff, String applicationName) {
         Thresholds thresholds = resolveThresholds(null);
+        Map<String, DismissedFinding> dismissedFingerprints =
+                dismissedFindingService.getDismissedFingerprints(applicationName);
         List<DiagnosisFinding> endpointFindings = new ArrayList<>();
         endpointFindings.addAll(checkSlowRequest(endpoint, records, thresholds));
         endpointFindings.addAll(checkHighErrorRate(endpoint, records, thresholds));
@@ -210,6 +219,7 @@ public class DiagnosisService {
         combined.addAll(correlateFindings(endpoint, records, endpointFindings, thresholds));
         combined.addAll(ruleEngineService.evaluate(endpoint, records));
         attachRegressionWatch(applicationName, combined);
+        attachDismissed(combined, dismissedFingerprints);
 
         return combined;
     }
@@ -234,6 +244,28 @@ public class DiagnosisService {
 
             snapshot.ifPresent(s -> finding.setReopenedInfo(new DiagnosisFinding.ReopenedInfo(
                     s.getMarkedFixedAt().toString(), s.getNote())));
+        }
+    }
+
+    // Per-finding dismiss: marks (does not remove) findings matching a
+    // dismissed (endpoint, ruleType) fingerprint, so a dismissed finding
+    // stays visible-but-muted and restorable from the same card rather than
+    // silently disappearing. Skips ROOT_CAUSE_CORRELATION for the same
+    // reason attachRegressionWatch does — no single concrete ruleType to
+    // dismiss against.
+    private void attachDismissed(List<DiagnosisFinding> findings, Map<String, DismissedFinding> dismissedFingerprints) {
+        if (dismissedFingerprints.isEmpty()) return;
+
+        for (DiagnosisFinding finding : findings) {
+            if ("ROOT_CAUSE_CORRELATION".equals(finding.getRuleType())) continue;
+
+            DismissedFinding dismissed = dismissedFingerprints.get(
+                    DismissedFindingService.fingerprintOf(finding.getEndpoint(), finding.getRuleType()));
+
+            if (dismissed != null) {
+                finding.setDismissedInfo(new DiagnosisFinding.DismissedInfo(
+                        dismissed.getDismissedAt().toString(), dismissed.getNote()));
+            }
         }
     }
 
