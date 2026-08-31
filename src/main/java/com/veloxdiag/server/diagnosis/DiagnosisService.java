@@ -29,11 +29,13 @@ public class DiagnosisService {
     private static final int UNKNOWN_RANK = 3;
 
     private static int severityRank(DiagnosisFinding f) {
-        return SEVERITY_RANK.getOrDefault(f.getSeverity(), UNKNOWN_RANK);
+        String severity = f.getSeverity();
+        return severity == null ? UNKNOWN_RANK : SEVERITY_RANK.getOrDefault(severity, UNKNOWN_RANK);
     }
 
     private static int confidenceRank(DiagnosisFinding f) {
-        return CONFIDENCE_RANK.getOrDefault(f.getConfidence(), UNKNOWN_RANK);
+        String confidence = f.getConfidence();
+        return confidence == null ? UNKNOWN_RANK : CONFIDENCE_RANK.getOrDefault(confidence, UNKNOWN_RANK);
     }
 
     private static final Comparator<DiagnosisFinding> BY_SEVERITY_THEN_CONFIDENCE =
