@@ -4,6 +4,7 @@ import com.veloxdiag.server.diagnosis.engine.EndpointMetrics;
 import com.veloxdiag.server.entity.Telemetry;
 import com.veloxdiag.server.repository.TelemetryRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -236,6 +237,7 @@ public class FixTrackingService {
     // for the different case of an accidental/wrong click that never should
     // have been marked at all; nothing else in the app could remove one
     // (checked AdminService's reset endpoints — they never touched this table).
+    @Transactional
     public long deleteFixSnapshot(String applicationName, String endpoint, String ruleType) {
         return fixSnapshotRepository.deleteByApplicationNameAndEndpointAndRuleType(
                 applicationName, endpoint, ruleType);

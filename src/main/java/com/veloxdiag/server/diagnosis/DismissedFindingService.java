@@ -1,6 +1,7 @@
 package com.veloxdiag.server.diagnosis;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -51,6 +52,7 @@ public class DismissedFindingService {
         return dismissedFindingRepository.save(dismissedFinding);
     }
 
+    @Transactional
     public void undismiss(String applicationName, String endpoint, String ruleType) {
         String normalizedEndpoint = EndpointNormalizer.normalize(endpoint);
         if (isBlank(applicationName)) {
