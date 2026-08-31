@@ -1,8 +1,10 @@
 package com.veloxdiag.server.diagnosis;
 
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Powers the dashboard's "Fixes" page: mark a finding as addressed, then
@@ -31,5 +33,20 @@ public class FixTrackingController {
     @GetMapping
     public List<FixComparisonDto> getComparisons(@RequestParam(required = false) String applicationName) {
         return fixTrackingService.getComparisons(applicationName);
+    }
+
+    // Actually removes the row — distinct from the auto-reopen behavior,
+    // which intentionally keeps a real fix's history when it regresses. This
+    // is for undoing an accidental/wrong click, which nothing else in the
+    // app (including the admin reset endpoints) could previously do.
+    @DeleteMapping
+    public ResponseEntity<?> deleteFix(@RequestParam String applicationName,
+                                        @RequestParam String endpoint,
+                                        @RequestParam String ruleType) {
+        long deleted = fixTrackingService.deleteFixSnapshot(applicationName, endpoint, ruleType);
+        if (deleted == 0) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(Map.of("deleted", deleted));
     }
 }

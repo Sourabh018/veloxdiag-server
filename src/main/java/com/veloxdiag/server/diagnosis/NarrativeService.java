@@ -17,6 +17,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -159,9 +161,14 @@ public class NarrativeService {
         } catch (Exception e) {
             System.out.println("[VeloxDiag] generateNarrative FAILED for " + endpoint + " — "
                     + e.getClass().getSimpleName() + ": " + e.getMessage());
-            String msg = e instanceof IllegalStateException
-                    ? "Narrative generation isn't configured (missing GROQ_API_KEY)."
-                    : "Narrative generation failed: " + e.getMessage();
+            String msg;
+            if (e instanceof IllegalStateException) {
+                msg = "Narrative generation isn't configured (missing GROQ_API_KEY).";
+            } else if (e.getMessage() != null && e.getMessage().startsWith("status 429")) {
+                msg = "AI explanation is temporarily rate-limited — try again in a moment.";
+            } else {
+                msg = "Narrative generation failed: " + e.getMessage();
+            }
             return new EndpointNarrative(endpoint, msg, ruleTypes);
         }
     }
@@ -302,37 +309,81 @@ public class NarrativeService {
         }
         String requestBody = buildRequestBody(systemPrompt, userPrompt, temperature);
 
-        int attempts = Math.max(1, keyRotator.keyCount());
-        String lastFailureBody = null;
-        int lastStatus = -1;
+        // Two passes: first pass rotates through every key on a 429 (handles
+        // a single bad/exhausted key), same as before. But Groq's real 429
+        // body in prod ("Rate limit reached... in organization org_...") is
+        // an ORGANIZATION-wide TPM cap — confirmed from the actual error text
+        // — so if every key in the same org fails with 429, rotating further
+        // keys from that org can't help; only waiting for the quota window to
+        // reset does. Second pass: honor Groq's own "try again in Xs" hint
+        // and retry once, since that's the one thing that actually works for
+        // this specific failure mode.
+        for (int pass = 0; pass < 2; pass++) {
+            int attempts = Math.max(1, keyRotator.keyCount());
+            String lastFailureBody = null;
+            int lastStatus = -1;
+            boolean allFailuresWere429 = true;
 
-        for (int i = 0; i < attempts; i++) {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(API_URL))
-                    .timeout(Duration.ofSeconds(30))
-                    .header("Content-Type", "application/json")
-                    .header("Authorization", "Bearer " + keyRotator.current())
-                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                    .build();
+            for (int i = 0; i < attempts; i++) {
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(API_URL))
+                        .timeout(Duration.ofSeconds(30))
+                        .header("Content-Type", "application/json")
+                        .header("Authorization", "Bearer " + keyRotator.current())
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                        .build();
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
-            if (response.statusCode() == 200) {
-                return extractText(response.body());
+                if (response.statusCode() == 200) {
+                    return extractText(response.body());
+                }
+
+                lastStatus = response.statusCode();
+                lastFailureBody = response.body();
+                if (response.statusCode() != 429) {
+                    allFailuresWere429 = false;
+                }
+
+                if (response.statusCode() == 429 && keyRotator.rotate()) {
+                    continue; // try next key — still worth doing in case it's a per-key limit, not org-wide
+                }
+                break;
             }
 
-            lastStatus = response.statusCode();
-            lastFailureBody = response.body();
-
-            if (response.statusCode() == 429 && keyRotator.rotate()) {
-                continue; // try next key
+            boolean canRetryWithBackoff = pass == 0 && lastStatus == 429 && allFailuresWere429;
+            if (!canRetryWithBackoff) {
+                String truncated = lastFailureBody != null && lastFailureBody.length() > 300
+                        ? lastFailureBody.substring(0, 300) : lastFailureBody;
+                throw new RuntimeException("status " + lastStatus + ": " + truncated);
             }
-            break; // non-429 failure, or no more keys to rotate to
+
+            long waitMs = parseRetryAfterMs(lastFailureBody);
+            Thread.sleep(waitMs);
         }
 
-        String truncated = lastFailureBody != null && lastFailureBody.length() > 300
-                ? lastFailureBody.substring(0, 300) : lastFailureBody;
-        throw new RuntimeException("status " + lastStatus + ": " + truncated);
+        throw new RuntimeException("status 429: rate limited even after backoff retry");
+    }
+
+    // Groq's 429 body includes a human-readable hint like "Please try again
+    // in 12.8925s" — this pulls that number out rather than guessing a fixed
+    // delay. Capped at 15s so a single narrative request can't hang the
+    // caller indefinitely; falls back to 5s if the hint isn't present/parseable.
+    private static final Pattern RETRY_AFTER_PATTERN = Pattern.compile("try again in (\\d+(?:\\.\\d+)?)s");
+
+    private long parseRetryAfterMs(String errorBody) {
+        if (errorBody == null) return 5000L;
+        Matcher m = RETRY_AFTER_PATTERN.matcher(errorBody);
+        if (m.find()) {
+            try {
+                double seconds = Double.parseDouble(m.group(1));
+                long ms = (long) Math.ceil(seconds * 1000);
+                return Math.min(Math.max(ms, 500L), 15000L);
+            } catch (NumberFormatException ignored) {
+                // fall through to default
+            }
+        }
+        return 5000L;
     }
 
     private String extractText(String responseBody) throws Exception {

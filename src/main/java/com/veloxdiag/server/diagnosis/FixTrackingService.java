@@ -229,4 +229,15 @@ public class FixTrackingService {
                 .orElse(0.0);
         return Math.sqrt(variance);
     }
+
+    // Genuinely deletes the fix record — distinct from the reopen behavior
+    // above, which just changes status while keeping the row (that's correct
+    // for a real fix that later regressed — you want that history). This is
+    // for the different case of an accidental/wrong click that never should
+    // have been marked at all; nothing else in the app could remove one
+    // (checked AdminService's reset endpoints — they never touched this table).
+    public long deleteFixSnapshot(String applicationName, String endpoint, String ruleType) {
+        return fixSnapshotRepository.deleteByApplicationNameAndEndpointAndRuleType(
+                applicationName, endpoint, ruleType);
+    }
 }
