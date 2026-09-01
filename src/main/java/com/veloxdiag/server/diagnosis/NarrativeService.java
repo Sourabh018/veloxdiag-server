@@ -345,8 +345,14 @@ public class NarrativeService {
                     allFailuresWere429 = false;
                 }
 
-                if (response.statusCode() == 429 && keyRotator.rotate()) {
-                    continue; // try next key — still worth doing in case it's a per-key limit, not org-wide
+                // Rotate past 401 too — a single bad/mistyped key (e.g. wrong
+                // key pasted for one of several accounts) must not block every
+                // request; try the other keys in the pool before giving up.
+                // 429 keeps rotating for the same reason as before (per-key
+                // limit vs org-wide is unknown until every key is tried).
+                boolean retryableStatus = response.statusCode() == 429 || response.statusCode() == 401;
+                if (retryableStatus && keyRotator.rotate()) {
+                    continue;
                 }
                 break;
             }
