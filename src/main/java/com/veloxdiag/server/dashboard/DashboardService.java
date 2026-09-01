@@ -96,38 +96,50 @@ public class DashboardService {
         return telemetryRepository.findDistinctApplicationNames();
     }
 
-    // Averages per-endpoint deduction across ALL endpoints seen in the current
-    // window (including ones with zero findings), rather than summing capped
-    // deductions directly. Summing meant the score could still collapse to 0
-    // once you simply had enough endpoints each near the per-endpoint cap —
-    // having more endpoints isn't itself worse, so endpoint count shouldn't be
-    // able to zero the score by itself. Averaging means the floor is bounded
-    // by MAX_DEDUCTION_PER_ENDPOINT (e.g. 100 - 30 = 70 worst case), and the
-    // score only approaches that floor if MOST endpoints are near-maxed, not
-    // just because there happen to be several of them.
+    // Averages per-endpoint deduction weighted by each unhealthy endpoint's
+    // share of traffic AMONG unhealthy endpoints — not against total app
+    // traffic. Weighting against total traffic was tried and rejected: with
+    // ~720 of 864 requests going to endpoints with zero findings, dividing by
+    // ALL traffic let those healthy requests dilute the score even further
+    // (93 -> ~97) instead of fixing the original dilution-by-endpoint-count
+    // bug. Weighting only within the unhealthy set means a broken endpoint
+    // that gets hit constantly (e.g. a confirmed 3.1x-slower N+1 on the
+    // app's busiest exam-taking endpoint) correctly drags the score down
+    // more than an equally-severe but rarely-called broken endpoint, while
+    // healthy endpoints — however much total traffic they carry — are
+    // excluded from the average entirely rather than papering over real
+    // problems just by existing in large numbers.
     private int computeHealthScore(String applicationName) {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(windowSettings.getLookbackDays());
         List<Telemetry> recent = (applicationName == null || applicationName.isBlank())
                 ? telemetryRepository.findByTimestampAfter(cutoff)
                 : telemetryRepository.findByApplicationNameAndTimestampAfter(applicationName, cutoff);
 
-        long totalEndpointCount = recent.stream()
-                .map(t -> EndpointNormalizer.normalize(t.getEndpoint()))
-                .distinct()
-                .count();
-
-        if (totalEndpointCount == 0) {
+        if (recent.isEmpty()) {
             return STARTING_SCORE;
         }
+
+        Map<String, Long> requestCountByEndpoint = recent.stream()
+                .collect(Collectors.groupingBy(
+                        t -> EndpointNormalizer.normalize(t.getEndpoint()),
+                        Collectors.counting()));
 
         List<DiagnosisFinding> findings = diagnosisService.runDiagnosis(applicationName);
         Map<String, List<DiagnosisFinding>> byEndpoint = findings.stream()
                 .collect(Collectors.groupingBy(DiagnosisFinding::getEndpoint));
 
-        int totalDeduction = 0;
-        for (List<DiagnosisFinding> endpointFindings : byEndpoint.values()) {
+        if (byEndpoint.isEmpty()) {
+            return STARTING_SCORE;
+        }
+
+        long unhealthyTrafficTotal = 0;
+        int endpointCountFallback = 0; // used only if none of the unhealthy endpoints matched any telemetry
+        Map<String, Integer> deductionByEndpoint = new java.util.HashMap<>();
+
+        for (Map.Entry<String, List<DiagnosisFinding>> entry : byEndpoint.entrySet()) {
+            String endpoint = entry.getKey();
             int endpointDeduction = 0;
-            for (DiagnosisFinding finding : endpointFindings) {
+            for (DiagnosisFinding finding : entry.getValue()) {
                 String severity = finding.getSeverity();
                 if ("HIGH".equals(severity)) {
                     endpointDeduction += HIGH_PENALTY;
@@ -137,12 +149,30 @@ public class DashboardService {
                     endpointDeduction += LOW_PENALTY;
                 }
             }
-            totalDeduction += Math.min(endpointDeduction, MAX_DEDUCTION_PER_ENDPOINT);
+            endpointDeduction = Math.min(endpointDeduction, MAX_DEDUCTION_PER_ENDPOINT);
+            deductionByEndpoint.put(endpoint, endpointDeduction);
+            unhealthyTrafficTotal += requestCountByEndpoint.getOrDefault(endpoint, 0L);
+            endpointCountFallback++;
         }
 
-        double averageDeduction = (double) totalDeduction / totalEndpointCount;
+        double weightedDeduction;
+        if (unhealthyTrafficTotal > 0) {
+            double sum = 0.0;
+            for (Map.Entry<String, Integer> entry : deductionByEndpoint.entrySet()) {
+                long endpointRequests = requestCountByEndpoint.getOrDefault(entry.getKey(), 0L);
+                sum += entry.getValue() * ((double) endpointRequests / unhealthyTrafficTotal);
+            }
+            weightedDeduction = sum;
+        } else {
+            // Edge case: findings exist for endpoints with no matching telemetry
+            // in this exact window (e.g. diagnosis ran over a slightly different
+            // slice). Fall back to a plain average across those endpoints rather
+            // than divide by zero.
+            weightedDeduction = deductionByEndpoint.values().stream()
+                    .mapToInt(Integer::intValue).average().orElse(0.0);
+        }
 
-        return Math.max(0, (int) Math.round(STARTING_SCORE - averageDeduction));
+        return Math.max(0, (int) Math.round(STARTING_SCORE - weightedDeduction));
     }
 
     public List<Telemetry> getRecent(int limit) {
