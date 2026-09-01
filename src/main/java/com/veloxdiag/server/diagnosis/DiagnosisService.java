@@ -588,7 +588,11 @@ public class DiagnosisService {
                         "High duration on %s is likely driven by its N+1 query pattern: requests with more than %d queries " +
                                 "averaged %.0fms (n=%d) vs %.0fms (n=%d) for requests at or below that threshold — roughly %.1fx slower.",
                         endpoint, thresholds.possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
-            } else if (ratio > 1.0) {
+            } else if (ratio >= 1.3) {
+                // Below 2x but still a real, non-noise gap — e.g. a ratio of 1.005x
+                // (like /api/exams/create's bulk-insert query-count spike, which
+                // costs zero extra time) must NOT read as "directionally consistent."
+                // 1.3x is comfortably above typical sample-to-sample duration jitter.
                 confidence = "MEDIUM";
                 message = String.format(
                         "High duration on %s may be partially driven by its N+1 query pattern: requests with more than %d queries " +
@@ -600,8 +604,9 @@ public class DiagnosisService {
                 message = String.format(
                         "Both SLOW_REQUEST and POSSIBLE_N_PLUS_ONE fired for %s, but the N+1 pattern does not appear to be " +
                                 "the primary driver of the slowness: requests with more than %d queries averaged %.0fms (n=%d) vs " +
-                                "%.0fms (n=%d) for requests at or below that threshold — roughly %.1fx, i.e. no slower (or faster). " +
-                                "The two findings likely have separate causes.",
+                                "%.0fms (n=%d) for requests at or below that threshold — roughly %.1fx, i.e. no meaningfully slower. " +
+                                "The two findings likely have separate causes (e.g. a write-heavy endpoint's query count reflects " +
+                                "a batched bulk insert, not repeated round-trips).",
                         endpoint, thresholds.possibleNPlusOneQueryThreshold, spikyAvg, spikyRecords.size(), normalAvg, normalRecords.size(), ratio);
             }
         } else {
