@@ -5,6 +5,8 @@ import com.veloxdiag.server.entity.SlowQueryPlan;
 import com.veloxdiag.server.entity.Telemetry;
 import com.veloxdiag.server.repository.SlowQueryPlanRepository;
 import com.veloxdiag.server.repository.TelemetryRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -16,6 +18,8 @@ import java.util.stream.Collectors;
 
 @Service
 public class DiagnosisService {
+
+    private static final Logger log = LoggerFactory.getLogger(DiagnosisService.class);
 
     static final String DEFAULT_KEY = "__default__";
 
@@ -391,6 +395,15 @@ public class DiagnosisService {
         boolean isRegression = flatBaseline
                 ? ratio >= 1.5 && (currentMean - baselineMean) > 50
                 : zScore >= REGRESSION_Z_SCORE_THRESHOLD;
+
+        // Always visible, even when it doesn't fire — without this there was no
+        // way to tell "close but under threshold" apart from "nowhere near,"
+        // which is exactly why this rule's real-world behavior stayed unconfirmed.
+        log.info("[PERFORMANCE_REGRESSION] {} baselineMean={} baselineStdDev={} currentMean={} " +
+                        "zScore={} ratio={} baselineSamples={} currentSamples={} flatBaseline={} fired={}",
+                endpoint, String.format("%.0f", baselineMean), String.format("%.1f", baselineStdDeviation),
+                String.format("%.0f", currentMean), String.format("%.2f", zScore), String.format("%.2f", ratio),
+                baselineDurations.size(), currentRecords.size(), flatBaseline, isRegression);
 
         if (!isRegression) {
             return List.of();
