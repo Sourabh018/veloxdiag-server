@@ -14,6 +14,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -366,7 +368,7 @@ public class RecommendationService {
             return new RecommendationExplanation(endpoint, ruleType, fallbackText, false);
         }
 
-        String capturedEvidence = buildCapturedEvidenceBlock(endpoint);
+        String capturedEvidence = buildCapturedEvidenceBlock(endpoint, applicationName);
         boolean hasCapturedEvidence = capturedEvidence != null && !capturedEvidence.isBlank();
         String userPrompt =
                 "Endpoint: " + endpoint + "\n" +
@@ -597,7 +599,37 @@ public class RecommendationService {
                 : "Unclear — no SQL query-count or EXPLAIN-plan evidence is present for this finding, so this may be a non-JPA app.";
     }
 
-    private String buildCapturedEvidenceBlock(String endpoint) {
+    // Same regex DiagnosisService uses to decide MISSING_INDEX_CANDIDATE — a
+    // captured "Seq Scan" alone isn't evidence of a real problem; Postgres
+    // correctly seq-scans small reference tables (a handful of rows) because
+    // it's cheaper than an index lookup there. Confirmed on CET_CELL's real
+    // /api/exams/create data: captured seq scans on topics/subjects (rows=1-2,
+    // cost ~1-2) are single one-time findById() lookups on tiny tables — real,
+    // not fabricated — but including them here let the LLM describe them as
+    // "once per question" and recommend indexes neither table needs. Filtering
+    // to the same >rowThreshold bar the rule engine already uses keeps the
+    // prompt's evidence limited to scans that are actually worth fixing.
+    private static final Pattern SEQ_SCAN_ROW_PATTERN = Pattern.compile(
+            "Seq Scan on (\\w+)(?:\\s+\\w+)?\\s*\\(cost=[\\d.]+\\.\\.[\\d.]+ rows=(\\d+)"
+    );
+
+    private boolean hasSeqScanAboveThreshold(String explainPlan, String applicationName) {
+        if (explainPlan == null) return false;
+        long threshold = diagnosisService.getSeqScanRowThreshold(applicationName);
+        Matcher m = SEQ_SCAN_ROW_PATTERN.matcher(explainPlan);
+        while (m.find()) {
+            try {
+                if (Long.parseLong(m.group(2)) > threshold) {
+                    return true;
+                }
+            } catch (NumberFormatException ignored) {
+                // malformed rows= value — skip this match, don't fail the whole check
+            }
+        }
+        return false;
+    }
+
+    private String buildCapturedEvidenceBlock(String endpoint, String applicationName) {
         List<SlowQueryPlan> plans = slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
         if (plans == null || plans.isEmpty()) {
             return "";
@@ -606,13 +638,22 @@ public class RecommendationService {
         int shown = 0;
         for (SlowQueryPlan plan : plans) {
             if (plan.getSqlText() == null || plan.getExplainPlan() == null) continue;
+            // Only surface this plan's seq-scan flag as meaningful evidence if
+            // at least one scanned table in it is actually large enough to
+            // matter — otherwise a real-but-trivial scan on a tiny table gets
+            // passed through as if it justified a fix.
+            boolean meaningfulSeqScan = plan.isContainsSeqScan()
+                    && hasSeqScanAboveThreshold(plan.getExplainPlan(), applicationName);
+            if (plan.isContainsSeqScan() && !meaningfulSeqScan) {
+                continue; // skip trivial small-table scans entirely — don't even show them
+            }
             if (shown == 0) {
                 sb.append("\nCaptured Query Evidence (real SQL + EXPLAIN plan recently observed on this endpoint):\n");
             }
             sb.append("Query ").append(++shown).append(":\n");
             sb.append("SQL: ").append(truncate(plan.getSqlText(), 400)).append("\n");
             sb.append("EXPLAIN: ").append(truncate(plan.getExplainPlan(), 400)).append("\n");
-            sb.append("Contains sequential scan: ").append(plan.isContainsSeqScan()).append("\n\n");
+            sb.append("Contains sequential scan: ").append(meaningfulSeqScan).append("\n\n");
             if (shown >= 2) break; // cap at 2 — enough real evidence without bloating the prompt
         }
         return sb.toString();
