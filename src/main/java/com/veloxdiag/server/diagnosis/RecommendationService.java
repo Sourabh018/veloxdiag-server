@@ -368,7 +368,7 @@ public class RecommendationService {
             return new RecommendationExplanation(endpoint, ruleType, fallbackText, false);
         }
 
-        String capturedEvidence = buildCapturedEvidenceBlock(endpoint, applicationName);
+        String capturedEvidence = buildCapturedEvidenceBlock(endpoint, applicationName, finding);
         boolean hasCapturedEvidence = capturedEvidence != null && !capturedEvidence.isBlank();
         String userPrompt =
                 "Endpoint: " + endpoint + "\n" +
@@ -592,7 +592,16 @@ public class RecommendationService {
         if (!hasSqlEvidence && finding.getEvidence() instanceof Map) {
             Map<?, ?> evidenceMap = (Map<?, ?>) finding.getEvidence();
             hasSqlEvidence = evidenceMap.containsKey("maxQueryCount")
-                    || evidenceMap.containsKey("averageQueryCount");
+                    || evidenceMap.containsKey("averageQueryCount")
+                    // MISSING_INDEX_CANDIDATE's evidence shape — only ever populated
+                    // from a real captured Postgres/MySQL EXPLAIN plan (see
+                    // DiagnosisService's SEQ_SCAN_PATTERN match), so its mere
+                    // presence is just as strong a SQL-stack signal as query counts.
+                    // Missing this meant a confirmed real finding (e.g. exam_questions,
+                    // 10,393 rows) could still get a MongoDB aside whenever the
+                    // recent-plans fetch below happened to miss the relevant plan.
+                    || evidenceMap.containsKey("candidateTables")
+                    || evidenceMap.containsKey("rowThreshold");
         }
         return hasSqlEvidence
                 ? "SQL/JPA (Java + Hibernate) — confirmed by real SQL query-count and/or EXPLAIN-plan evidence for this finding. Do not mention MongoDB/Mongoose."
@@ -629,8 +638,44 @@ public class RecommendationService {
         return false;
     }
 
-    private String buildCapturedEvidenceBlock(String endpoint, String applicationName) {
-        List<SlowQueryPlan> plans = slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
+    private String buildCapturedEvidenceBlock(String endpoint, String applicationName, DiagnosisFinding finding) {
+        List<SlowQueryPlan> plans;
+        if ("MISSING_INDEX_CANDIDATE".equals(finding.getRuleType()) && finding.getEvidence() instanceof Map) {
+            // The finding's own evidence already names the real offending table(s)
+            // (computed by the rule engine across ALL captured plans, not just
+            // recent ones). Search the endpoint's full seq-scan history for a
+            // plan that actually matches one of those tables, instead of
+            // whatever happened to be captured most recently — which may belong
+            // to an unrelated finding (e.g. a correlated N+1 on a different
+            // table) and crowd out the one this specific recommendation is about.
+            Object candidateTablesObj = ((Map<?, ?>) finding.getEvidence()).get("candidateTables");
+            Set<String> candidateTables = (candidateTablesObj instanceof Map)
+                    ? ((Map<?, ?>) candidateTablesObj).keySet().stream().map(String::valueOf).collect(Collectors.toSet())
+                    : Set.of();
+
+            List<SlowQueryPlan> allSeqScans = slowQueryPlanRepository
+                    .findByEndpointAndContainsSeqScanTrueOrderByTimestampAsc(endpoint);
+            plans = allSeqScans.stream()
+                    .filter(p -> p.getSqlText() != null
+                            && candidateTables.stream().anyMatch(t -> p.getSqlText().toLowerCase(Locale.ROOT).contains(t.toLowerCase(Locale.ROOT))))
+                    .sorted(Comparator.comparing(SlowQueryPlan::getTimestamp).reversed())
+                    .limit(2)
+                    .collect(Collectors.toList());
+
+            if (plans.isEmpty()) {
+                // No matching plan found even in full history — fall back to the
+                // generic top-3 rather than showing nothing, since some evidence
+                // (even if not table-matched) is still better than silence.
+                plans = applicationName != null && !applicationName.isBlank()
+                        ? slowQueryPlanRepository.findTop3ByApplicationNameAndEndpointOrderByTimestampDesc(applicationName, endpoint)
+                        : slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
+            }
+        } else {
+            plans = applicationName != null && !applicationName.isBlank()
+                    ? slowQueryPlanRepository.findTop3ByApplicationNameAndEndpointOrderByTimestampDesc(applicationName, endpoint)
+                    : slowQueryPlanRepository.findTop3ByEndpointOrderByTimestampDesc(endpoint);
+        }
+
         if (plans == null || plans.isEmpty()) {
             return "";
         }
