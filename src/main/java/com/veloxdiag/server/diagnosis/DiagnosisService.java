@@ -352,17 +352,22 @@ public class DiagnosisService {
 
     private List<DiagnosisFinding> checkPerformanceRegression(String endpoint, List<Telemetry> records) {
         if (records.size() < MIN_BASELINE_SAMPLE_COUNT * 2) {
+            log.info("[PERFORMANCE_REGRESSION] {} skipped: only {} total records, need >= {}",
+                    endpoint, records.size(), MIN_BASELINE_SAMPLE_COUNT * 2);
             return List.of();
         }
 
         java.time.LocalDateTime earliest = records.stream().map(Telemetry::getTimestamp).min(java.time.LocalDateTime::compareTo).orElse(null);
         java.time.LocalDateTime latest = records.stream().map(Telemetry::getTimestamp).max(java.time.LocalDateTime::compareTo).orElse(null);
         if (earliest == null || latest == null) {
+            log.info("[PERFORMANCE_REGRESSION] {} skipped: no valid timestamps in {} records", endpoint, records.size());
             return List.of();
         }
 
         long totalSeconds = java.time.Duration.between(earliest, latest).getSeconds();
         if (totalSeconds < 120) {
+            log.info("[PERFORMANCE_REGRESSION] {} skipped: {} records only span {}s, need >= 120s",
+                    endpoint, records.size(), totalSeconds);
             return List.of();
         }
         java.time.LocalDateTime midpoint = earliest.plusSeconds(totalSeconds / 2);
@@ -377,6 +382,10 @@ public class DiagnosisService {
         List<Long> baselineDurations = baselineRecords.stream().map(Telemetry::getDurationMs).collect(Collectors.toList());
 
         if (baselineDurations.size() < MIN_BASELINE_SAMPLE_COUNT || currentRecords.isEmpty()) {
+            log.info("[PERFORMANCE_REGRESSION] {} skipped: baseline={} samples (need >= {}), current={} samples " +
+                            "— split at midpoint {} over a {}s window ({} total records)",
+                    endpoint, baselineDurations.size(), MIN_BASELINE_SAMPLE_COUNT, currentRecords.size(),
+                    midpoint, totalSeconds, records.size());
             return List.of();
         }
 
