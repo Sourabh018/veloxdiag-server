@@ -11,7 +11,9 @@ public class RecommendationExplanation {
     private String endpoint;
     private String ruleType;
     private String suggestion;   // AI-generated, tailored to this endpoint's real evidence
-    private boolean aiGenerated; // false when falling back to the static template (key exhausted, no evidence, etc.)
+    private boolean aiGenerated; // true only when real captured SQL/EXPLAIN evidence backed this suggestion —
+                                  // false for a successful-but-generic AI write-up, a static template fallback,
+                                  // or a discarded response that fabricated evidence it was never given.
 
     public RecommendationExplanation(String endpoint, String ruleType, String suggestion, boolean aiGenerated) {
         this.endpoint = endpoint;

@@ -367,6 +367,7 @@ public class RecommendationService {
         }
 
         String capturedEvidence = buildCapturedEvidenceBlock(endpoint);
+        boolean hasCapturedEvidence = capturedEvidence != null && !capturedEvidence.isBlank();
         String userPrompt =
                 "Endpoint: " + endpoint + "\n" +
                 "Rule type: " + finding.getRuleType() + "\n" +
@@ -374,12 +375,29 @@ public class RecommendationService {
                 "Message: " + finding.getMessage() + "\n" +
                 (finding.getEvidence() != null ? "Evidence: " + finding.getEvidence() + "\n" : "") +
                 "Detected Stack: " + detectStack(finding, capturedEvidence) + "\n" +
-                capturedEvidence;
+                capturedEvidence +
+                (hasCapturedEvidence ? "" :
+                    "\n\u26a0 NO CAPTURED QUERY EVIDENCE IS AVAILABLE for this finding. Do not write or imply " +
+                    "that any specific SQL, EXPLAIN plan, or table/column name was observed — no \"the captured " +
+                    "plan shows...\", no \"the logs show...\", no named tables. Use placeholder names like " +
+                    "YourEntity, relatedCollection, parentId instead.\n");
 
         try {
             String result = callGroqForSuggestion(SUGGESTION_SYSTEM_PROMPT, userPrompt);
             if (result != null && !result.isBlank()) {
-                return new RecommendationExplanation(endpoint, ruleType, result, true);
+                if (!hasCapturedEvidence && claimsFalseEvidence(result)) {
+                    // The model fabricated evidence anyway despite the explicit
+                    // instruction above — a real, observed failure mode (e.g. the
+                    // /api/exams/create "topics and subjects seq scan" claim that
+                    // does not exist anywhere in this app's actual code). Rather
+                    // than trust wording alone to prevent this, discard the output
+                    // deterministically and fall back to the honest generic
+                    // template instead of shipping a confident-sounding lie.
+                    System.out.println("[VeloxDiag] generateAiSuggestion: discarded fabricated-evidence claim for "
+                            + endpoint + "/" + ruleType + " — using fallback template.");
+                    return new RecommendationExplanation(endpoint, ruleType, fallbackText, false);
+                }
+                return new RecommendationExplanation(endpoint, ruleType, result, hasCapturedEvidence);
             }
             System.out.println("[VeloxDiag] generateAiSuggestion: Groq returned null/blank for " + endpoint + "/" + ruleType + " — using fallback template.");
         } catch (Exception e) {
@@ -388,6 +406,21 @@ public class RecommendationService {
         }
 
         return new RecommendationExplanation(endpoint, ruleType, fallbackText, false);
+    }
+
+    // Deterministic net for exactly the failure mode confirmed on /api/exams/create:
+    // the model claiming to have seen real captured evidence when none was sent.
+    // Checked only when hasCapturedEvidence is false — these phrases are fine
+    // when real evidence WAS provided.
+    private static final List<String> FALSE_EVIDENCE_PHRASES = List.of(
+            "the captured plan shows", "the captured logs show", "the captured query",
+            "the recent runs show", "the recent logs show", "we observed", "the logs show",
+            "the plan shows a sequential scan", "explain plan shows"
+    );
+
+    private boolean claimsFalseEvidence(String result) {
+        String lower = result.toLowerCase(java.util.Locale.ROOT);
+        return FALSE_EVIDENCE_PHRASES.stream().anyMatch(lower::contains);
     }
 
     // Reuses the existing deterministic message text as the fallback, so the
